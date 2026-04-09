@@ -82,10 +82,12 @@ def inject_css():
                 background: linear-gradient(180deg, {PRIMARY_BLUE} 0%, #052F49 55%, #041F30 100%);
                 color: {WHITE};
             }}
+
             .block-container {{
                 padding-top: 1.2rem;
                 padding-bottom: 2rem;
             }}
+
             .mrs-card {{
                 background: rgba(255,255,255,0.08);
                 border: 1px solid rgba(255,255,255,0.14);
@@ -93,6 +95,7 @@ def inject_css():
                 padding: 16px 18px;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.25);
             }}
+
             .mrs-header {{
                 display: flex;
                 align-items: center;
@@ -104,6 +107,7 @@ def inject_css():
                 padding: 14px 18px;
                 margin-bottom: 18px;
             }}
+
             .mrs-title {{
                 font-size: 30px;
                 font-weight: 800;
@@ -111,6 +115,7 @@ def inject_css():
                 text-align: center;
                 margin: 0;
             }}
+
             .mrs-subtitle {{
                 font-size: 14px;
                 opacity: 0.92;
@@ -141,19 +146,24 @@ def inject_css():
             /* BASE: tudo branco no card */
             .mrs-card, .mrs-card * {{
                 color: #FFFFFF !important;
+                opacity: 1 !important;
             }}
 
-            /* EXCEÇÕES: inputs/selects (fundo branco, texto preto) */
+            /* EXCEÇÕES: inputs (fundo branco, texto preto) */
             .mrs-card .stTextInput input,
             .mrs-card .stDateInput input {{
                 background: #FFFFFF !important;
                 color: {DARK_TEXT} !important;
                 border-radius: 10px !important;
+                opacity: 1 !important;
             }}
+
+            /* EXCEÇÕES: select/multiselect (apenas dentro do combobox do select!) */
             .mrs-card div[data-baseweb="select"] div[role="combobox"] {{
                 background: #FFFFFF !important;
                 color: {DARK_TEXT} !important;
                 border-radius: 10px !important;
+                opacity: 1 !important;
             }}
             .mrs-card div[data-baseweb="select"] div[role="combobox"] * {{
                 color: {DARK_TEXT} !important;
@@ -164,7 +174,7 @@ def inject_css():
                 opacity: 1 !important;
             }}
 
-            /* ✅ CORREÇÃO FINAL: Toggle labels sempre brancos + opacity 1 */
+            /* ✅ Correção agressiva para toggles (o seu print mostra label escuro por opacity) */
             .mrs-card div[data-testid="stToggle"] *,
             .mrs-card [data-baseweb="base-switch"] *,
             .mrs-card [role="switch"] * {{
@@ -196,7 +206,7 @@ def build_header():
 
 
 # ============================================================
-# 2) Séries do SMAC (fixas conforme anexo anterior)
+# 2) Séries (conforme legenda do SMAC)
 # ============================================================
 
 SERIES_SMAC = [
@@ -224,7 +234,7 @@ SERIES_SMAC = [
 
 
 # ============================================================
-# 3) Automação SMAC/Climatempo
+# 3) Automação SMAC
 # ============================================================
 
 @dataclass
@@ -292,64 +302,69 @@ class SmacExporter:
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
 
-    # ---------------- Drawer robusto ----------------
+    # -------- Drawer apenas para Histórico --------
     def open_nav_drawer(self):
-        """
-        Correção do timeout: tenta várias formas de abrir o drawer e faz retry.
-        """
         p = self.page
 
-        # Tentativa 1: botão com aria-label
+        def drawer_visible():
+            return p.get_by_text(re.compile(r"Acontece agora|Previsão|Histórico|Estações|Sensores|Climatologia", re.I)).count() > 0
+
+        # 1) tenta botões com aria-label
         candidates = [
             p.locator("button[aria-label*='menu' i]"),
             p.locator("button[aria-label*='navigation' i]"),
             p.get_by_role("button", name=re.compile("menu|☰", re.I)),
         ]
-
-        def drawer_visible():
-            return p.get_by_text(re.compile(r"Acontece agora|Previsão|Histórico|Estações|Sensores|Climatologia", re.I)).count() > 0
-
-        # tenta clicar candidatos
         for cand in candidates:
             if cand.count() > 0:
                 try:
                     cand.first.click(timeout=2500)
                     p.wait_for_timeout(300)
                     if drawer_visible():
-                        return
+                        return True
                 except Exception:
                     pass
 
-        # Tentativa 2: clique por coordenada (hambúrguer no topo esquerdo)
+        # 2) fallback coordenada (hambúrguer)
         for _ in range(3):
             p.mouse.click(18, 70)
             p.wait_for_timeout(450)
             if drawer_visible():
-                return
+                return True
 
-        # Se ainda não abriu, falha com mensagem útil
-        raise RuntimeError("Não consegui abrir o menu lateral (☰). Me envie o outerHTML do botão ☰ para travar o seletor.")
+        return False
 
     def goto_section(self, section_name: str):
+        """
+        ✅ Correção: Previsão NÃO depende de drawer (já é /forecast).
+        Drawer fica só para Histórico.
+        """
         self.goto_forecast()
         self.page.wait_for_timeout(800)
-        self.open_nav_drawer()
-        self.page.get_by_text(re.compile(rf"^{re.escape(section_name)}$", re.I)).first.click()
+        if section_name.lower().startswith("previs"):
+            return
+
+        ok = self.open_nav_drawer()
+        if not ok:
+            raise RuntimeError("Não consegui abrir o menu lateral (☰) para acessar Histórico. Envie o outerHTML do botão ☰.")
+
+        self.page.get_by_text(re.compile(r"^Histórico$", re.I)).first.click()
         self.page.wait_for_timeout(900)
 
-    # ---------------- Dropdowns e Período conforme prints ----------------
     def set_top_filters(self, tipo: str, local: str, data_ini: str, data_fim: str):
         p = self.page
 
-        # Dropdown Tipo (abre e seleciona)
+        # Dropdown Tipo: botão com texto atual (Cidade/Pátio/Pontos Monitorados)
         p.get_by_role("button", name=re.compile(r"^(Cidade|Pátio|Patio|Pontos Monitorados)$", re.I)).first.click()
         p.get_by_text(re.compile(rf"^{re.escape(tipo)}$", re.I)).first.click()
         p.wait_for_timeout(250)
 
-        # Dropdown Local (abre, usa Procurar, seleciona)
-        # tenta clicar no botão que mostra o valor atual (ex.: Alumínio)
-        btn_local = p.get_by_role("button", name=re.compile(r".+", re.I)).filter(has=p.locator("svg")).nth(1)
-        btn_local.click()
+        # Dropdown Local: abre 2º dropdown; usa Procurar
+        dropdown_buttons = p.locator("button").filter(has=p.locator("svg"))
+        if dropdown_buttons.count() >= 2:
+            dropdown_buttons.nth(1).click()
+        else:
+            p.mouse.click(650, 155)
         p.wait_for_timeout(250)
 
         search = p.get_by_placeholder(re.compile("Procurar", re.I))
@@ -363,6 +378,7 @@ class SmacExporter:
         # Período + Buscar
         p.get_by_role("button", name=re.compile(r"Per[ií]odo", re.I)).first.click()
         p.wait_for_timeout(250)
+
         buscar_btn = p.get_by_role("button", name=re.compile("Buscar", re.I)).first
         buscar_btn.wait_for(timeout=12000)
 
@@ -374,47 +390,49 @@ class SmacExporter:
         buscar_btn.click()
         p.wait_for_timeout(900)
 
-    # ---------------- Opções do dropdown local (para preencher a UI) ----------------
-    def fetch_local_options(self, tipo: str, sample_current_button_index: int = 1) -> List[str]:
+    def fetch_local_options(self, tipo: str) -> List[str]:
         """
-        Seleciona o tipo e abre o dropdown Local, retornando as opções visíveis.
+        ✅ Correção: não depende de drawer, sempre trabalha em /forecast.
         """
         p = self.page
+        self.goto_forecast()
+        p.wait_for_timeout(800)
 
         # Seleciona tipo
         p.get_by_role("button", name=re.compile(r"^(Cidade|Pátio|Patio|Pontos Monitorados)$", re.I)).first.click()
         p.get_by_text(re.compile(rf"^{re.escape(tipo)}$", re.I)).first.click()
         p.wait_for_timeout(300)
 
-        # Abre dropdown local (2º select)
-        btn_local = p.get_by_role("button", name=re.compile(r".+", re.I)).filter(has=p.locator("svg")).nth(sample_current_button_index)
-        btn_local.click()
+        # Abre dropdown local (2º)
+        dropdown_buttons = p.locator("button").filter(has=p.locator("svg"))
+        if dropdown_buttons.count() >= 2:
+            dropdown_buttons.nth(1).click()
+        else:
+            p.mouse.click(650, 155)
         p.wait_for_timeout(300)
 
-        # Captura itens visíveis (li/div do menu)
-        items = p.locator("li, div").filter(has_text=re.compile(r".+"))
-        texts = items.evaluate(
+        # Coleta opções visíveis do menu (li / role=option)
+        texts = p.evaluate(
             """() => {
                 const out = new Set();
-                const nodes = Array.from(document.querySelectorAll('li, [role="option"], div'));
+                const nodes = Array.from(document.querySelectorAll('li, [role="option"]'));
                 for (const n of nodes) {
                     const t = (n.innerText || '').trim();
                     if (!t) continue;
-                    if (t.length > 60) continue;
-                    if (['Procurar','Buscar','Cidade','Pátio','Pontos Monitorados'].includes(t)) continue;
-                    // evita pegar textos do gráfico
+                    if (t.length > 80) continue;
+                    if (t.toLowerCase() === 'procurar') continue;
                     out.add(t);
                 }
                 return Array.from(out);
             }"""
         )
 
-        # fecha dropdown clicando fora
+        # Fecha dropdown
         p.mouse.click(10, 10)
         p.wait_for_timeout(150)
+
         return sorted({t.strip() for t in texts if t.strip()})
 
-    # ---------------- Séries ----------------
     def apply_series_selection(self, mode: str, series: Optional[List[str]] = None):
         p = self.page
         p.mouse.wheel(0, 1600)
@@ -445,7 +463,6 @@ class SmacExporter:
                 except Exception:
                     pass
 
-    # ---------------- Engrenagem / export ----------------
     def open_settings_menu(self):
         p = self.page
         trigger = p.locator("#basic-button")
@@ -474,10 +491,9 @@ class SmacExporter:
     def _set_switch(self, menu, label_text: str, desired: bool):
         item = menu.locator("li[role='menuitem']").filter(has_text=re.compile(label_text, re.I)).first
         sw = item.get_by_role("switch")
-        sw.wait_for(state="visible", timeout=8_000)
+        sw.wait_for(state="visible", timeout=8000)
         current = sw.get_attribute("aria-checked")
-        is_on = (current == "true")
-        if is_on != desired:
+        if (current == "true") != desired:
             sw.click()
             self.page.wait_for_timeout(120)
 
@@ -494,10 +510,6 @@ class SmacExporter:
         return final_path
 
 
-# ============================================================
-# Preview Excel
-# ============================================================
-
 def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
     xls = pd.ExcelFile(xlsx_path, engine="openpyxl")
     sheets = xls.sheet_names
@@ -507,10 +519,6 @@ def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
         data[sh] = df.head(max_rows)
     return data, sheets
 
-
-# ============================================================
-# App Streamlit
-# ============================================================
 
 def main():
     inject_css()
@@ -557,7 +565,6 @@ def main():
         data_ini = dt_ini.strftime("%d/%m/%Y")
         data_fim = dt_fim.strftime("%d/%m/%Y")
 
-        # botão para o app "aprender" as opções do dropdown direito (local)
         if st.button("📥 Carregar opções do SMAC (Local)", use_container_width=True):
             if not user or not password:
                 st.warning("Configure credenciais via Secrets.")
@@ -567,18 +574,17 @@ def main():
                         cfg = SmacConfig(headless=True)
                         with SmacExporter(cfg) as ex:
                             ex.login(user, password)
-                            ex.goto_section(section)
+                            # ✅ não depende de drawer
                             st.session_state.local_options = ex.fetch_local_options(tipo=tipo)
                         st.success(f"Opções carregadas: {len(st.session_state.local_options)}")
                     except Exception as e:
                         st.session_state.last_error = str(e)
                         st.error(f"Falha ao carregar opções: {e}")
 
-        # local: se já carregou opções, vira selectbox, senão texto livre
         if st.session_state.local_options:
             local = st.selectbox("Local", st.session_state.local_options)
         else:
-            local = st.text_input("Local", value="Alumínio", help="Você pode carregar opções automaticamente acima.")
+            local = st.text_input("Local", value="Alumínio")
 
         st.divider()
 
@@ -656,7 +662,6 @@ def main():
 
                     st.session_state.last_file = str(final_file)
                     st.success("Relatório exportado com sucesso!")
-
                 except Exception as e:
                     st.session_state.last_error = str(e)
                     st.error(f"Falha na exportação: {e}")
