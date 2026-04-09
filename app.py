@@ -40,6 +40,7 @@ def ensure_playwright_chromium():
         env = os.environ.copy()
         cmd = [sys.executable, "-m", "playwright", "install", "chromium", "--only-shell"]
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+
         if result.returncode != 0:
             cmd2 = [sys.executable, "-m", "playwright", "install", "chromium"]
             result2 = subprocess.run(cmd2, env=env, capture_output=True, text=True)
@@ -82,12 +83,10 @@ def inject_css():
                 background: linear-gradient(180deg, {PRIMARY_BLUE} 0%, #052F49 55%, #041F30 100%);
                 color: {WHITE};
             }}
-
             .block-container {{
                 padding-top: 1.2rem;
                 padding-bottom: 2rem;
             }}
-
             .mrs-card {{
                 background: rgba(255,255,255,0.08);
                 border: 1px solid rgba(255,255,255,0.14);
@@ -95,7 +94,6 @@ def inject_css():
                 padding: 16px 18px;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.25);
             }}
-
             .mrs-header {{
                 display: flex;
                 align-items: center;
@@ -107,7 +105,6 @@ def inject_css():
                 padding: 14px 18px;
                 margin-bottom: 18px;
             }}
-
             .mrs-title {{
                 font-size: 30px;
                 font-weight: 800;
@@ -115,7 +112,6 @@ def inject_css():
                 text-align: center;
                 margin: 0;
             }}
-
             .mrs-subtitle {{
                 font-size: 14px;
                 opacity: 0.92;
@@ -158,7 +154,7 @@ def inject_css():
                 opacity: 1 !important;
             }}
 
-            /* EXCEÇÕES: select/multiselect (apenas dentro do combobox do select!) */
+            /* EXCEÇÕES: select/multiselect (somente dentro do combobox do select) */
             .mrs-card div[data-baseweb="select"] div[role="combobox"] {{
                 background: #FFFFFF !important;
                 color: {DARK_TEXT} !important;
@@ -174,10 +170,13 @@ def inject_css():
                 opacity: 1 !important;
             }}
 
-            /* ✅ Correção agressiva para toggles (o seu print mostra label escuro por opacity) */
+            /* ✅ Correção agressiva para Toggle: força branco e opacity 1 */
             .mrs-card div[data-testid="stToggle"] *,
             .mrs-card [data-baseweb="base-switch"] *,
-            .mrs-card [role="switch"] * {{
+            .mrs-card [role="switch"] *,
+            .mrs-card div[data-testid="stToggle"] label,
+            .mrs-card div[data-testid="stToggle"] p,
+            .mrs-card div[data-testid="stToggle"] span {{
                 color: #FFFFFF !important;
                 opacity: 1 !important;
                 filter: none !important;
@@ -206,7 +205,7 @@ def build_header():
 
 
 # ============================================================
-# 2) Séries (conforme legenda do SMAC)
+# 2) Séries (legenda)
 # ============================================================
 
 SERIES_SMAC = [
@@ -302,70 +301,74 @@ class SmacExporter:
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
 
-    # -------- Drawer apenas para Histórico --------
-    def open_nav_drawer(self):
-        p = self.page
-
-        def drawer_visible():
-            return p.get_by_text(re.compile(r"Acontece agora|Previsão|Histórico|Estações|Sensores|Climatologia", re.I)).count() > 0
-
-        # 1) tenta botões com aria-label
-        candidates = [
-            p.locator("button[aria-label*='menu' i]"),
-            p.locator("button[aria-label*='navigation' i]"),
-            p.get_by_role("button", name=re.compile("menu|☰", re.I)),
-        ]
-        for cand in candidates:
-            if cand.count() > 0:
-                try:
-                    cand.first.click(timeout=2500)
-                    p.wait_for_timeout(300)
-                    if drawer_visible():
-                        return True
-                except Exception:
-                    pass
-
-        # 2) fallback coordenada (hambúrguer)
-        for _ in range(3):
-            p.mouse.click(18, 70)
-            p.wait_for_timeout(450)
-            if drawer_visible():
-                return True
-
-        return False
-
     def goto_section(self, section_name: str):
         """
-        ✅ Correção: Previsão NÃO depende de drawer (já é /forecast).
-        Drawer fica só para Histórico.
+        Previsão = /forecast (não depende de drawer)
+        Histórico ainda não implementado aqui (se precisar, a gente trava pelo HTML do botão ☰).
         """
         self.goto_forecast()
         self.page.wait_for_timeout(800)
         if section_name.lower().startswith("previs"):
             return
-
-        ok = self.open_nav_drawer()
-        if not ok:
-            raise RuntimeError("Não consegui abrir o menu lateral (☰) para acessar Histórico. Envie o outerHTML do botão ☰.")
-
-        self.page.get_by_text(re.compile(r"^Histórico$", re.I)).first.click()
-        self.page.wait_for_timeout(900)
-
-    def set_top_filters(self, tipo: str, local: str, data_ini: str, data_fim: str):
+        # fallback simples: tenta abrir drawer por coordenada (pode ajustar depois)
         p = self.page
+        p.mouse.click(18, 70)
+        p.wait_for_timeout(400)
+        p.get_by_text(re.compile(r"^Histórico$", re.I)).first.click()
+        p.wait_for_timeout(900)
 
-        # Dropdown Tipo: botão com texto atual (Cidade/Pátio/Pontos Monitorados)
-        p.get_by_role("button", name=re.compile(r"^(Cidade|Pátio|Patio|Pontos Monitorados)$", re.I)).first.click()
-        p.get_by_text(re.compile(rf"^{re.escape(tipo)}$", re.I)).first.click()
+    # ---------------- Helpers do topo (corrigidos) ----------------
+
+    def _topbar_container(self):
+        """
+        Encontra um container 'estável' no topo, usando o botão 'Período' como âncora.
+        """
+        p = self.page
+        period_btn = p.locator("button", has_text=re.compile(r"Per[ií]odo", re.I)).first
+        period_btn.wait_for(timeout=15000)
+        # sobe alguns níveis até achar um container com >= 3 botões
+        for level in range(1, 9):
+            cont = period_btn.locator(f"xpath=ancestor::div[{level}]")
+            if cont.locator("button").count() >= 3:
+                return cont
+        return period_btn.locator("xpath=ancestor::div[1]")
+
+    def _open_tipo_dropdown(self):
+        """
+        Abre o dropdown Tipo (Cidade/Pátio/Pontos Monitorados) usando texto visível,
+        sem depender de accessible name.
+        """
+        p = self.page
+        cont = self._topbar_container()
+        # botão que contém um destes textos
+        btn = cont.locator("button", has_text=re.compile(r"(Cidade|Pátio|Patio|Pontos Monitorados)", re.I)).first
+        btn.wait_for(timeout=15000)
+        btn.click()
         p.wait_for_timeout(250)
 
-        # Dropdown Local: abre 2º dropdown; usa Procurar
-        dropdown_buttons = p.locator("button").filter(has=p.locator("svg"))
-        if dropdown_buttons.count() >= 2:
-            dropdown_buttons.nth(1).click()
+    def _select_tipo(self, tipo: str):
+        self._open_tipo_dropdown()
+        self.page.get_by_text(re.compile(rf"^{re.escape(tipo)}$", re.I)).first.click()
+        self.page.wait_for_timeout(250)
+
+    def _open_local_dropdown(self):
+        """
+        Abre o dropdown Local (direita).
+        Estratégia: no container do topo, pegar o *segundo* botão com chevron (svg).
+        """
+        p = self.page
+        cont = self._topbar_container()
+        btns = cont.locator("button").filter(has=cont.locator("svg"))
+        if btns.count() >= 2:
+            btns.nth(1).click()
         else:
+            # fallback coordenada
             p.mouse.click(650, 155)
         p.wait_for_timeout(250)
+
+    def _select_local(self, local: str):
+        p = self.page
+        self._open_local_dropdown()
 
         search = p.get_by_placeholder(re.compile("Procurar", re.I))
         if search.count() > 0:
@@ -375,43 +378,40 @@ class SmacExporter:
         p.get_by_text(re.compile(rf"^{re.escape(local)}$", re.I)).first.click()
         p.wait_for_timeout(250)
 
-        # Período + Buscar
-        p.get_by_role("button", name=re.compile(r"Per[ií]odo", re.I)).first.click()
+    def _set_period_and_search(self, data_ini: str, data_fim: str):
+        p = self.page
+        p.locator("button", has_text=re.compile(r"Per[ií]odo", re.I)).first.click()
         p.wait_for_timeout(250)
 
         buscar_btn = p.get_by_role("button", name=re.compile("Buscar", re.I)).first
-        buscar_btn.wait_for(timeout=12000)
+        buscar_btn.wait_for(timeout=15000)
 
         pop = buscar_btn.locator("xpath=ancestor::div[3]")
         inputs = pop.locator("input")
         if inputs.count() >= 2:
             inputs.nth(0).fill(data_ini)
             inputs.nth(1).fill(data_fim)
+
         buscar_btn.click()
         p.wait_for_timeout(900)
 
+    def set_top_filters(self, tipo: str, local: str, data_ini: str, data_fim: str):
+        self._select_tipo(tipo)
+        self._select_local(local)
+        self._set_period_and_search(data_ini, data_fim)
+
     def fetch_local_options(self, tipo: str) -> List[str]:
         """
-        ✅ Correção: não depende de drawer, sempre trabalha em /forecast.
+        Lê as opções do dropdown Local após selecionar o Tipo.
         """
         p = self.page
         self.goto_forecast()
         p.wait_for_timeout(800)
 
-        # Seleciona tipo
-        p.get_by_role("button", name=re.compile(r"^(Cidade|Pátio|Patio|Pontos Monitorados)$", re.I)).first.click()
-        p.get_by_text(re.compile(rf"^{re.escape(tipo)}$", re.I)).first.click()
-        p.wait_for_timeout(300)
+        self._select_tipo(tipo)
+        self._open_local_dropdown()
 
-        # Abre dropdown local (2º)
-        dropdown_buttons = p.locator("button").filter(has=p.locator("svg"))
-        if dropdown_buttons.count() >= 2:
-            dropdown_buttons.nth(1).click()
-        else:
-            p.mouse.click(650, 155)
-        p.wait_for_timeout(300)
-
-        # Coleta opções visíveis do menu (li / role=option)
+        # captura opções visíveis
         texts = p.evaluate(
             """() => {
                 const out = new Set();
@@ -427,10 +427,8 @@ class SmacExporter:
             }"""
         )
 
-        # Fecha dropdown
         p.mouse.click(10, 10)
         p.wait_for_timeout(150)
-
         return sorted({t.strip() for t in texts if t.strip()})
 
     def apply_series_selection(self, mode: str, series: Optional[List[str]] = None):
@@ -574,7 +572,6 @@ def main():
                         cfg = SmacConfig(headless=True)
                         with SmacExporter(cfg) as ex:
                             ex.login(user, password)
-                            # ✅ não depende de drawer
                             st.session_state.local_options = ex.fetch_local_options(tipo=tipo)
                         st.success(f"Opções carregadas: {len(st.session_state.local_options)}")
                     except Exception as e:
