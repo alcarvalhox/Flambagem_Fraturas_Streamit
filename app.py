@@ -16,23 +16,25 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
 
 # ============================================================
-# 0) Bootstrap: instalar Chromium do Playwright automaticamente
+# 0) Bootstrap: garantir Chromium do Playwright (Streamlit Cloud)
 # ============================================================
 
 @st.cache_resource
 def ensure_playwright_chromium():
     """
-    Instala Chromium do Playwright automaticamente (uma vez por instância do app).
-    Otimização: tenta instalar apenas o "headless shell" (mais rápido) e,
-    se falhar, instala o Chromium completo.
+    Instala o Chromium do Playwright automaticamente (1x por instância do app).
+
+    Otimização:
+      - Instala apenas o "headless shell" (mais leve) por padrão.
+      - Se falhar, faz fallback para instalar o Chromium completo.
     """
     sentinel_dir = Path.home() / ".cache" / "mrs_playwright"
     sentinel_dir.mkdir(parents=True, exist_ok=True)
     sentinel_file = sentinel_dir / "chromium_installed.ok"
+
     if sentinel_file.exists():
         return True
 
-    # Lock simples para evitar instalações concorrentes na mesma instância
     lock_file = sentinel_dir / "install.lock"
     start = time.time()
     while lock_file.exists() and time.time() - start < 120:
@@ -46,21 +48,20 @@ def ensure_playwright_chromium():
 
         env = os.environ.copy()
 
-        # 1) tentar headless shell (menor / mais rápido)
+        # Tenta instalar headless shell (mais rápido em cloud)
         cmd = [sys.executable, "-m", "playwright", "install", "chromium", "--only-shell"]
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
         if result.returncode != 0:
-            # 2) fallback: instalar Chromium completo
+            # Fallback para Chromium completo
             cmd2 = [sys.executable, "-m", "playwright", "install", "chromium"]
             result2 = subprocess.run(cmd2, env=env, capture_output=True, text=True)
+
             if result2.returncode != 0:
                 raise RuntimeError(
                     "Falha ao instalar Chromium do Playwright.\n"
-                    "Tentativa headless shell:\n"
-                    f"{result.stderr}\n\n"
-                    "Tentativa completa:\n"
-                    f"{result2.stderr}"
+                    f"Tentativa headless shell (STDERR):\n{result.stderr}\n\n"
+                    f"Tentativa completa (STDERR):\n{result2.stderr}"
                 )
 
         sentinel_file.write_text("ok", encoding="utf-8")
@@ -75,7 +76,7 @@ def ensure_playwright_chromium():
 
 
 # ============================================================
-# 1) Configurações visuais do App
+# 1) UI / Tema
 # ============================================================
 
 APP_TITLE = "Painel de Previsões de Flambagens e Fraturas"
@@ -92,7 +93,6 @@ def inject_css():
     st.markdown(
         f"""
         <style>
-            /* Fundo geral */
             .stApp {{
                 background: linear-gradient(180deg, {PRIMARY_BLUE} 0%, #052F49 55%, #041F30 100%);
                 color: {WHITE};
@@ -103,7 +103,6 @@ def inject_css():
                 padding-bottom: 2rem;
             }}
 
-            /* Cards */
             .mrs-card {{
                 background: rgba(255,255,255,0.08);
                 border: 1px solid rgba(255,255,255,0.14);
@@ -112,15 +111,6 @@ def inject_css():
                 box-shadow: 0 8px 24px rgba(0,0,0,0.25);
             }}
 
-            /* Força textos dos cards e widgets internos para branco (legibilidade) */
-            .mrs-card, .mrs-card * {{
-                color: #FFFFFF !important;
-            }}
-            div[data-baseweb="radio"] * {{ color: #FFFFFF !important; }}
-            div[data-baseweb="select"] * {{ color: #FFFFFF !important; }}
-            label, .stMarkdown, .stText, .stCaption {{ color: #FFFFFF !important; }}
-
-            /* Header */
             .mrs-header {{
                 display: flex;
                 align-items: center;
@@ -149,10 +139,10 @@ def inject_css():
                 text-align: center;
             }}
 
-            /* Botões Streamlit */
+            /* Botões */
             div.stButton > button {{
                 background: {ACCENT_YELLOW};
-                color: #0B2233 !important;
+                color: #0B2233;
                 border: none;
                 border-radius: 10px;
                 padding: 0.62rem 1rem;
@@ -166,12 +156,22 @@ def inject_css():
                 transform: translateY(-1px);
             }}
 
-            /* Download button */
+            /* Download */
             .stDownloadButton > button {{
                 background: #1dd1a1 !important;
                 color: #063B5C !important;
                 font-weight: 900 !important;
                 border-radius: 10px !important;
+            }}
+
+            /* ========= CORREÇÃO #2: textos legíveis (branco) ========= */
+            .mrs-card, .mrs-card * {{
+                color: #FFFFFF !important;
+            }}
+            div[data-baseweb="radio"] * {{ color: #FFFFFF !important; }}
+            div[data-baseweb="select"] * {{ color: #FFFFFF !important; }}
+            label, .stMarkdown, .stText, .stCaption {{
+                color: #FFFFFF !important;
             }}
         </style>
         """,
@@ -268,6 +268,8 @@ class SmacExporter:
             self._context = None
             self._page = None
 
+    # ---------------- Login ----------------
+
     def login(self, username: str, password: str):
         p = self.page
         p.goto(f"{self.cfg.base_url}{self.cfg.login_path}", wait_until="domcontentloaded")
@@ -282,11 +284,11 @@ class SmacExporter:
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
 
+    # ---------------- CORREÇÃO #4: evitar timeout no "Previsão" ----------------
     def goto_section(self, section_name: str):
         """
-        Correção do timeout:
-        - Se for 'Previsão', não depende do menu ☰: vai direto por URL /forecast.
-        - Se for 'Histórico', tenta via menu ☰ com busca tolerante.
+        Previsão: vai direto por URL /forecast (robusto).
+        Histórico: tenta via menu ☰.
         """
         p = self.page
 
@@ -294,12 +296,11 @@ class SmacExporter:
             self.goto_forecast()
             return
 
-        # Histórico: abrir menu ☰
+        # Histórico -> menu ☰
         candidates = [
             p.locator("button[aria-label*='menu' i]"),
             p.get_by_role("button", name=re.compile("menu|Menu|☰", re.I)),
         ]
-
         opened = False
         for c in candidates:
             if c.count() > 0:
@@ -313,10 +314,11 @@ class SmacExporter:
 
         p.wait_for_timeout(500)
 
-        # clique tolerante: Histórico/Historico
         item = p.get_by_text(re.compile("Históric|Historico", re.I))
         item.first.click()
         p.wait_for_timeout(900)
+
+    # ---------------- Filtros topo ----------------
 
     def set_top_filters(self, cidade: str, unidade: Optional[str], data_ini: str, data_fim: str):
         p = self.page
@@ -324,6 +326,7 @@ class SmacExporter:
         datetime.strptime(data_fim, "%d/%m/%Y")
 
         self._select_combo_by_label("Cidade", cidade)
+
         if unidade:
             self._select_combo_by_label(unidade, unidade, allow_same_label=True)
 
@@ -338,6 +341,7 @@ class SmacExporter:
                 loc.nth(1).fill(data_fim)
                 filled = True
                 break
+
         if not filled:
             p.keyboard.type(data_ini)
             p.keyboard.press("Tab")
@@ -372,6 +376,7 @@ class SmacExporter:
             p.get_by_text(re.compile(rf"^{re.escape(value)}$", re.I)),
             p.get_by_text(re.compile(re.escape(value), re.I)),
         ]
+
         for c in candidates:
             if c.count() > 0:
                 c.first.click()
@@ -389,60 +394,59 @@ class SmacExporter:
 
         raise RuntimeError(f"Não consegui selecionar '{value}' no combo '{label_text}'.")
 
+    # ---------------- Séries (rodapé) ----------------
+
+    # CORREÇÃO #3: melhorar detecção das séries (mais robusta)
     def list_available_series(self) -> List[str]:
-        """
-        Lista séries do rodapé de forma mais robusta:
-        - tenta localizar o bloco do gráfico usando "Selecionar Todos/Desmarcar Todos" como âncora
-        - coleta textos clicáveis (cursor pointer / role / onclick) dentro da área do bloco
-        """
         p = self.page
 
         sel_all = p.get_by_text(re.compile(r"Selecionar\s+Todos", re.I))
         des_all = p.get_by_text(re.compile(r"Desmarcar\s+Todos", re.I))
 
-        # scroll até achar os botões (âncora)
+        # Tenta trazer para a tela o bloco do gráfico/rodapé
         for _ in range(6):
             if sel_all.count() > 0 or des_all.count() > 0:
                 break
-            p.mouse.wheel(0, 950)
+            p.mouse.wheel(0, 900)
             p.wait_for_timeout(250)
 
-        blacklist = [
-            "Cidade", "Período", "Exportar", "Configurar limiares", "Selecionar Todos", "Desmarcar Todos",
-            "Modelos", "Horário", "Diário", "Mensal", "Habilitar Gráfico", "Habilitar Tabela", "Habilitar Mapas"
-        ]
+        # Blacklist de textos que não são séries
+        blacklist = {
+            "Cidade", "Período", "Exportar", "Configurar limiares",
+            "Selecionar Todos", "Desmarcar Todos",
+            "Modelos", "Horário", "Diário", "Mensal",
+            "Habilitar Gráfico", "Habilitar Tabela", "Habilitar Mapas"
+        }
 
-        # define um retângulo de recorte (anchor)
-        anchor = None
+        # Se existe um anchor (botões selecionar/desmarcar), tentamos coletar textos clicáveis próximos
+        anchor_js = None
         if sel_all.count() > 0:
-            anchor = sel_all.first
+            anchor_js = sel_all.first
         elif des_all.count() > 0:
-            anchor = des_all.first
+            anchor_js = des_all.first
 
-        if anchor:
-            # Pega um container pai próximo
-            container = anchor.locator("xpath=ancestor::div[2]")
+        if anchor_js:
+            # Vamos subir um pouco no DOM para pegar o container do gráfico/legenda
+            container = anchor_js.locator("xpath=ancestor::div[2]")
             texts = container.evaluate(
-                """(blacklistArr) => {
-                    const blacklist = new Set(blacklistArr.map(x => x.toLowerCase()));
+                """(blacklist) => {
                     const out = new Set();
+                    const ar = this.getBoundingClientRect();
 
-                    const root = this;
-                    const rr = root.getBoundingClientRect();
-
-                    const cand = Array.from(document.querySelectorAll('span, label, div, p, li'));
-                    for (const el of cand) {
+                    const all = Array.from(document.querySelectorAll('span, div, label, p, li'));
+                    for (const el of all) {
                         const r = el.getBoundingClientRect();
                         if (r.width < 5 || r.height < 5) continue;
-                        // dentro do retângulo do container
-                        if (r.left < rr.left || r.right > rr.right || r.top < rr.top || r.bottom > rr.bottom) continue;
+
+                        // dentro (aproximado) do retângulo do container
+                        if (r.left < ar.left - 5 || r.right > ar.right + 5 || r.top < ar.top - 5 || r.bottom > ar.bottom + 60) continue;
 
                         const t = (el.innerText || el.textContent || '').trim();
-                        if (!t || t.length < 2 || t.length > 80) continue;
-                        if (blacklist.has(t.toLowerCase())) continue;
+                        if (!t || t.length < 2 || t.length > 70) continue;
+                        if (blacklist.has(t)) continue;
 
                         const style = window.getComputedStyle(el);
-                        const clickable = (style.cursor === 'pointer') || !!el.onclick || el.getAttribute('role') === 'button';
+                        const clickable = (style.cursor === 'pointer') || el.getAttribute('role') === 'button' || !!el.onclick;
                         if (!clickable) continue;
 
                         out.add(t);
@@ -452,15 +456,15 @@ class SmacExporter:
                 blacklist
             )
         else:
-            # fallback geral
+            # Fallback: varredura genérica na página
             texts = p.evaluate(
                 """(blacklistArr) => {
                     const blacklist = new Set(blacklistArr.map(x => x.toLowerCase()));
                     const out = new Set();
-                    const cand = Array.from(document.querySelectorAll('span, label, div, p, li'));
-                    for (const el of cand) {
+                    const all = Array.from(document.querySelectorAll('span, div, label, p, li'));
+                    for (const el of all) {
                         const t = (el.innerText || el.textContent || '').trim();
-                        if (!t || t.length < 2 || t.length > 80) continue;
+                        if (!t || t.length < 2 || t.length > 70) continue;
                         if (blacklist.has(t.toLowerCase())) continue;
                         const style = window.getComputedStyle(el);
                         const clickable = (style.cursor === 'pointer') || !!el.onclick || el.getAttribute('role') === 'button';
@@ -469,20 +473,16 @@ class SmacExporter:
                     }
                     return Array.from(out);
                 }""",
-                blacklist
+                list(blacklist)
             )
 
-        return sorted({t.strip() for t in texts if t and t.strip()})
+        clean = sorted({t.strip() for t in texts if t and t.strip()})
+        return clean
 
     def set_series(self, series: Union[str, Iterable[str]] = "ALL"):
         p = self.page
-
-        # garantir que está no bloco do gráfico
-        for _ in range(4):
-            if p.get_by_text(re.compile(r"Selecionar\s+Todos", re.I)).count() > 0:
-                break
-            p.mouse.wheel(0, 900)
-            p.wait_for_timeout(200)
+        p.mouse.wheel(0, 1200)
+        p.wait_for_timeout(250)
 
         btn_select_all = p.get_by_text(re.compile(r"Selecionar\s+Todos", re.I))
         btn_unselect_all = p.get_by_text(re.compile(r"Desmarcar\s+Todos", re.I))
@@ -506,6 +506,7 @@ class SmacExporter:
                 p.wait_for_timeout(250)
             return
 
+        # LIST
         if btn_unselect_all.count() > 0:
             btn_unselect_all.first.click()
             p.wait_for_timeout(250)
@@ -522,10 +523,12 @@ class SmacExporter:
                 not_found.append(name)
 
         if not_found:
-            # fallback para ALL (não quebra)
+            # fallback para ALL
             if btn_select_all.count() > 0:
                 btn_select_all.first.click()
-            print(f"[AVISO] Séries não encontradas: {not_found}. Fallback: ALL.")
+            print(f"[AVISO] Séries não encontradas no DOM: {not_found}. Fallback: ALL.")
+
+    # ---------------- Engrenagem e export ----------------
 
     def open_settings_menu(self):
         p = self.page
@@ -546,7 +549,6 @@ class SmacExporter:
         if opts.modelo:
             combo = menu.get_by_role("combobox")
             combo.first.click()
-
             opt = p.get_by_role("option", name=re.compile(re.escape(opts.modelo), re.I))
             if opt.count() > 0:
                 opt.first.click()
@@ -586,10 +588,10 @@ class SmacExporter:
 
 
 # ============================================================
-# 3) Auxiliares do app (preview excel)
+# 3) Preview Excel
 # ============================================================
 
-def read_excel_preview(xlsx_path: Path, max_rows: int = 200) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
     xls = pd.ExcelFile(xlsx_path, engine="openpyxl")
     sheets = xls.sheet_names
     data = {}
@@ -606,34 +608,25 @@ def read_excel_preview(xlsx_path: Path, max_rows: int = 200) -> Tuple[Dict[str, 
 def main():
     inject_css()
 
-    # prepara chromium
+    # Prepara Playwright/Chromium
     with st.spinner("Preparando ambiente (Playwright/Chromium)..."):
         ensure_playwright_chromium()
 
-    # header
     st.markdown("<div class='mrs-header'>", unsafe_allow_html=True)
     build_header()
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # session state
+    # Session State
     if "series_available" not in st.session_state:
         st.session_state.series_available = []
     if "last_file" not in st.session_state:
         st.session_state.last_file = None
     if "last_error" not in st.session_state:
         st.session_state.last_error = None
-    if "filters_confirmed" not in st.session_state:
-        st.session_state.filters_confirmed = False
-    if "series_loaded" not in st.session_state:
-        st.session_state.series_loaded = False
-    if "prepared_signature" not in st.session_state:
-        st.session_state.prepared_signature = ""
 
     left, right = st.columns([2.4, 1.0], gap="large")
 
-    # ---------------------------------------------------------
-    # LEFT: Configurações (sequência normal de uso)
-    # ---------------------------------------------------------
+    # ---------------- Painel Esquerdo (configuração) ----------------
     with left:
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("1) Configurações do Relatório")
@@ -641,22 +634,20 @@ def main():
         section = st.selectbox(
             "Seção no menu ☰ (3 riscos)",
             options=["Previsão", "Histórico"],
-            index=0
+            index=0,
+            help="Previsão abre direto /forecast. Histórico tenta via menu ☰."
         )
 
-        # Credenciais automatizadas por Secrets (recomendado)
+        # CORREÇÃO #1: login/senha automáticos (via Secrets)
         st.markdown("**Credenciais (SMAC/Climatempo)**")
-        user = st.secrets.get("SMAC_USER", "mrs")  # usuário padrão ok
-        password = st.secrets.get("SMAC_PASS", "")  # senha deve vir do Secrets
+        # Default do usuário (conforme solicitado), senha via secrets por segurança.
+        user = st.secrets.get("SMAC_USER", "mrs")
+        password = st.secrets.get("SMAC_PASS", "")
 
-        # Fallback opcional: permitir digitar se secrets não estiver configurado
+        # Expansor opcional para fallback manual se secrets não estiverem setados
         with st.expander("🔐 Ajustar credenciais (opcional)", expanded=False):
-            user = st.text_input("Usuário", value=user)
-            password = st.text_input("Senha", value=password, type="password")
-
-        creds_ok = bool(user) and bool(password)
-        if not creds_ok:
-            st.warning("Configure SMAC_USER/SMAC_PASS em Settings → Secrets (recomendado).")
+            user = st.text_input("Usuário", value=user, placeholder="Usuário do SMAC")
+            password = st.text_input("Senha", value=password, type="password", placeholder="Senha do SMAC")
 
         st.divider()
 
@@ -672,25 +663,6 @@ def main():
 
         data_ini = dt_ini.strftime("%d/%m/%Y")
         data_fim = dt_fim.strftime("%d/%m/%Y")
-
-        filtros_ok = bool(cidade.strip()) and bool(unidade.strip()) and (dt_fim >= dt_ini)
-
-        # Botão: confirmar filtros (passo obrigatório para habilitar execução)
-        confirm = st.button("✅ Confirmar filtros", use_container_width=True)
-        if confirm:
-            if not filtros_ok:
-                st.error("Revise Cidade/Unidade e o Período (Data final deve ser >= Data inicial).")
-            elif not creds_ok:
-                st.error("Credenciais ausentes.")
-            else:
-                # assinatura dos filtros (se mudar filtro, precisa reconfirmar)
-                sig = f"{section}|{cidade}|{unidade}|{data_ini}|{data_fim}"
-                st.session_state.prepared_signature = sig
-                st.session_state.filters_confirmed = True
-                # ao mudar filtros, séries precisam recarregar
-                st.session_state.series_loaded = False
-                st.session_state.series_available = []
-                st.success("Filtros confirmados. Agora selecione as Séries do Rodapé.")
 
         st.divider()
 
@@ -708,7 +680,9 @@ def main():
 
         st.divider()
 
+        # CORREÇÃO #3: modo manual carrega séries automaticamente
         st.markdown("**Séries do Rodapé (Legenda)**")
+
         series_mode = st.radio(
             "Modo de séries",
             options=["Todas (ALL)", "Selecionar manualmente"],
@@ -716,75 +690,68 @@ def main():
             horizontal=True
         )
 
-        # Botão: carregar séries (só faz sentido depois dos filtros confirmados)
-        load_series = st.button("🔎 Carregar/Atualizar séries disponíveis", use_container_width=True)
+        reload_series = st.button("🔎 Carregar/Atualizar séries disponíveis", use_container_width=True)
+        auto_load_needed = (series_mode == "Selecionar manualmente" and not st.session_state.series_available)
 
-        # Se entrar no modo manual e não tiver séries, força usuário a carregar
-        manual_needs_series = (series_mode == "Selecionar manualmente" and not st.session_state.series_available)
+        if reload_series or auto_load_needed:
+            st.session_state.last_error = None
 
-        if (load_series or manual_needs_series) and st.session_state.filters_confirmed:
-            if not creds_ok:
-                st.error("Credenciais ausentes.")
+            if not user or not password:
+                st.warning("Credenciais ausentes. Configure em Secrets ou informe no expansor.")
             else:
                 with st.spinner("Detectando séries do rodapé..."):
                     try:
                         cfg = SmacConfig(headless=True)
                         with SmacExporter(cfg) as ex:
                             ex.login(user, password)
-                            ex.goto_section(section)
+                            ex.goto_section(section)  # Previsão direto por URL
                             ex.set_top_filters(cidade=cidade, unidade=unidade, data_ini=data_ini, data_fim=data_fim)
                             st.session_state.series_available = ex.list_available_series()
 
                         if st.session_state.series_available:
-                            st.session_state.series_loaded = True
                             st.success(f"Séries detectadas: {len(st.session_state.series_available)}")
                         else:
-                            st.session_state.series_loaded = False
                             st.warning("Não foi possível detectar séries. Você pode seguir com ALL.")
                     except Exception as e:
-                        st.session_state.series_loaded = False
                         st.session_state.last_error = str(e)
                         st.error(f"Falha ao carregar séries: {e}")
 
-        if (load_series or manual_needs_series) and not st.session_state.filters_confirmed:
-            st.info("Primeiro clique em **✅ Confirmar filtros** para carregar séries corretamente.")
-
         selected_series: Union[str, List[str]] = "ALL"
         if series_mode == "Selecionar manualmente":
-            if not st.session_state.series_available:
-                st.info("As séries ainda não estão carregadas. Use o botão acima (após confirmar filtros).")
             selected_series = st.multiselect(
                 "Escolha as séries",
                 options=st.session_state.series_available,
                 default=[],
                 key="manual_series"
             )
+            if not st.session_state.series_available:
+                st.info("Ainda não há séries carregadas. Use o botão acima ou prossiga com ALL.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---------------------------------------------------------
-    # RIGHT: Execução (último passo) + Preview + Download
-    # ---------------------------------------------------------
+    # ---------------- Painel Direito (execução FINAL + preview + download) ----------------
     with right:
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("2) Executar e Baixar (última etapa)")
 
-        # Só habilita se:
-        # - credenciais ok
-        # - filtros confirmados
-        # - se manual: séries carregadas (ou ao menos lista disponível)
-        manual_ok = True
+        # CORREÇÃO #5: impedir execução antes de definir filtros/credenciais
+        filtros_ok = bool(cidade.strip()) and bool(unidade.strip()) and (dt_fim >= dt_ini)
+        creds_ok = bool(user) and bool(password)
+
+        # Se manual, recomenda ter carregado (mas se não, ainda pode rodar com fallback ALL)
         if series_mode == "Selecionar manualmente":
-            manual_ok = bool(st.session_state.series_available)  # evita usuário rodar sem lista
+            manual_ok = True  # não bloqueia, pois podemos fazer fallback ALL
+        else:
+            manual_ok = True
 
-        ready_to_run = creds_ok and st.session_state.filters_confirmed and (manual_ok or series_mode == "Todas (ALL)")
+        ready_to_run = filtros_ok and creds_ok and manual_ok
 
-        if not st.session_state.filters_confirmed:
-            st.warning("Clique em **✅ Confirmar filtros** antes de executar.")
-        if series_mode == "Selecionar manualmente" and not manual_ok:
-            st.info("Carregue as séries antes de executar (modo manual).")
+        if not creds_ok:
+            st.warning("Credenciais ausentes. Configure em Secrets ou informe no expansor.")
+        if not filtros_ok:
+            st.warning("Revise os filtros (Cidade/Unidade/Período).")
 
-        # Form garante que o botão seja o último e evita cliques prematuros
+        # Botão FINAL em form (sequência natural)
         with st.form("run_form", clear_on_submit=False):
             headless = st.toggle("Rodar em modo invisível (headless)", value=True)
             submitted = st.form_submit_button(
@@ -820,6 +787,7 @@ def main():
                         if series_mode == "Todas (ALL)":
                             ex.set_series("ALL")
                         else:
+                            # Se manual e vazio: fallback ALL
                             ex.set_series(selected_series if selected_series else "ALL")
 
                         menu = ex.open_settings_menu()
@@ -833,9 +801,11 @@ def main():
                     st.session_state.last_error = str(e)
                     st.error(f"Falha na exportação: {e}")
 
+        # Erros
         if st.session_state.last_error:
             st.error(st.session_state.last_error)
 
+        # Preview + download
         if st.session_state.last_file:
             xlsx_path = Path(st.session_state.last_file)
 
