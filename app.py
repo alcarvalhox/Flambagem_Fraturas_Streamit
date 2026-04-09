@@ -26,17 +26,18 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 @st.cache_resource
 def ensure_playwright_chromium():
     """
-    Instala o Chromium do Playwright automaticamente (uma vez por instância do app).
+    Instala Chromium do Playwright automaticamente (uma vez por instância do app).
+
+    Otimização:
+      - Por padrão instala apenas o "headless shell" (menor e mais rápido) para uso em nuvem.
+      - Se detectar que você quer rodar "headed", instala o Chromium completo.
     """
-    # Sentinel para evitar reinstalar se o cache do Streamlit resetar parcialmente
     sentinel_dir = Path.home() / ".cache" / "mrs_playwright"
     sentinel_dir.mkdir(parents=True, exist_ok=True)
     sentinel_file = sentinel_dir / "chromium_installed.ok"
-
     if sentinel_file.exists():
         return True
 
-    # "Lock" simples: evita 2 usuários instalarem ao mesmo tempo na mesma instância
     lock_file = sentinel_dir / "install.lock"
     start = time.time()
     while lock_file.exists() and time.time() - start < 120:
@@ -45,18 +46,34 @@ def ensure_playwright_chromium():
     try:
         lock_file.write_text("locked", encoding="utf-8")
     except Exception:
-        # se não conseguir criar lock, segue sem lock
         pass
 
     try:
-        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
         env = os.environ.copy()
 
-        # Dica: você pode fixar o local dos browsers se precisar, mas em geral o cache padrão funciona.
-        # env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+        # Decide se instala somente headless shell (mais rápido) ou completo
+        # No Streamlit Cloud, geralmente você só precisa de headless.
+        install_headless_only = True
+
+        if install_headless_only:
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium", "--only-shell"]
+        else:
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
 
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-        if result.returncode != 0:
+
+        # Se falhar no only-shell (raro), tenta instalar Chromium completo como fallback
+        if result.returncode != 0 and install_headless_only:
+            cmd2 = [sys.executable, "-m", "playwright", "install", "chromium"]
+            result2 = subprocess.run(cmd2, env=env, capture_output=True, text=True)
+            if result2.returncode != 0:
+                raise RuntimeError(
+                    "Falha ao instalar Chromium do Playwright.\n"
+                    f"Tentativa headless shell (STDERR):\n{result.stderr}\n\n"
+                    f"Tentativa completa (STDERR):\n{result2.stderr}"
+                )
+
+        elif result.returncode != 0:
             raise RuntimeError(
                 "Falha ao instalar Chromium do Playwright.\n"
                 f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
