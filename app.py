@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Union, Tuple, Dict
+from typing import Iterable, List, Optional, Union
 
 import streamlit as st
 import pandas as pd
@@ -85,6 +85,7 @@ APP_SUBTITLE = "Automação SMAC/Climatempo • Exportação de Relatórios (Pre
 PRIMARY_BLUE = "#063B5C"
 ACCENT_YELLOW = "#F6B300"
 WHITE = "#FFFFFF"
+DARK_TEXT = "#0B2233"
 
 st.set_page_config(page_title=APP_TITLE, page_icon="📈", layout="wide")
 
@@ -142,7 +143,7 @@ def inject_css():
             /* Botões */
             div.stButton > button {{
                 background: {ACCENT_YELLOW};
-                color: #0B2233;
+                color: {DARK_TEXT};
                 border: none;
                 border-radius: 10px;
                 padding: 0.62rem 1rem;
@@ -159,19 +160,56 @@ def inject_css():
             /* Download */
             .stDownloadButton > button {{
                 background: #1dd1a1 !important;
-                color: #063B5C !important;
+                color: {PRIMARY_BLUE} !important;
                 font-weight: 900 !important;
                 border-radius: 10px !important;
             }}
 
-            /* ========= CORREÇÃO #2: textos legíveis (branco) ========= */
-            .mrs-card, .mrs-card * {{
+            /* ========= TEXTOS: BRANCO NA ÁREA ESCURA ========= */
+            .mrs-card .stMarkdown, 
+            .mrs-card .stText, 
+            .mrs-card .stCaption,
+            .mrs-card h1, .mrs-card h2, .mrs-card h3, .mrs-card h4,
+            .mrs-card p, .mrs-card label {{
                 color: #FFFFFF !important;
             }}
-            div[data-baseweb="radio"] * {{ color: #FFFFFF !important; }}
-            div[data-baseweb="select"] * {{ color: #FFFFFF !important; }}
-            label, .stMarkdown, .stText, .stCaption {{
+
+            /* Rádio: garante branco (Modo de Séries) */
+            div[data-testid="stRadio"] * {{
                 color: #FFFFFF !important;
+            }}
+
+            /* Toggle: garante branco (Habilitar...) */
+            div[data-testid="stToggle"] * {{
+                color: #FFFFFF !important;
+            }}
+
+            /* ========= INPUTS/SELECTS: FUNDO BRANCO, TEXTO PRETO ========= */
+            /* Text input e Date input */
+            .stTextInput input, .stDateInput input {{
+                background: #FFFFFF !important;
+                color: {DARK_TEXT} !important;
+                border-radius: 10px !important;
+            }}
+
+            /* Select (combobox) - corrige "Periodicidade" e "Escolha as séries" (multiselect) */
+            div[data-baseweb="select"] div[role="combobox"] {{
+                background: #FFFFFF !important;
+                color: {DARK_TEXT} !important;
+                border-radius: 10px !important;
+            }}
+            div[data-baseweb="select"] div[role="combobox"] * {{
+                color: {DARK_TEXT} !important;
+            }}
+
+            /* Lista dropdown (quando abre) */
+            div[data-baseweb="select"] div[role="listbox"] * {{
+                color: {DARK_TEXT} !important;
+            }}
+
+            /* Remoção de conflitos de cor em spans internos */
+            div[data-baseweb="select"] span {{
+                color: {DARK_TEXT} !important;
             }}
         </style>
         """,
@@ -284,10 +322,10 @@ class SmacExporter:
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
 
-    # ---------------- CORREÇÃO #4: evitar timeout no "Previsão" ----------------
+    # ---------------- Seção (Previsão / Histórico) ----------------
     def goto_section(self, section_name: str):
         """
-        Previsão: vai direto por URL /forecast (robusto).
+        Previsão: vai direto por URL /forecast (robusto, evita timeout no menu).
         Histórico: tenta via menu ☰.
         """
         p = self.page
@@ -295,6 +333,10 @@ class SmacExporter:
         if section_name.lower().startswith("previs"):
             self.goto_forecast()
             return
+
+        # Garantir que estamos em uma tela com menu (ir para forecast primeiro)
+        self.goto_forecast()
+        p.wait_for_timeout(500)
 
         # Histórico -> menu ☰
         candidates = [
@@ -325,11 +367,15 @@ class SmacExporter:
         datetime.strptime(data_ini, "%d/%m/%Y")
         datetime.strptime(data_fim, "%d/%m/%Y")
 
-        self._select_combo_by_label("Cidade", cidade)
+        # Cidade (robusto)
+        self._select_combo("Cidade", cidade)
 
+        # Unidade
         if unidade:
-            self._select_combo_by_label(unidade, unidade, allow_same_label=True)
+            # Em alguns layouts "Alumínio" é o próprio label visível; tentamos do mesmo jeito
+            self._select_combo(unidade, unidade, allow_type_and_enter=True)
 
+        # Período (abre datepicker)
         p.get_by_text(re.compile(r"\bPeríodo\b", re.I)).first.click()
         p.wait_for_timeout(250)
 
@@ -357,19 +403,50 @@ class SmacExporter:
 
         p.wait_for_timeout(900)
 
-    def _select_combo_by_label(self, label_text: str, value: str, allow_same_label: bool = False):
+    def _select_combo(self, label_text: str, value: str, allow_type_and_enter: bool = True):
+        """
+        Correção do timeout do 'Cidade':
+        - Não depende de placeholder "Cidade".
+        - Tenta: role=combobox com name (se existir) -> container do label -> combobox dentro/sibling
+        - Seleciona opção por role=option/menuitem/texto e (fallback) digita+Enter.
+        """
         p = self.page
-        label = p.get_by_text(re.compile(rf"\b{re.escape(label_text)}\b", re.I)).first
-        if label.count() == 0:
-            label = p.get_by_placeholder(re.compile(label_text, re.I)).first
 
-        try:
-            label.click()
-        except Exception:
-            label.locator("..").click()
+        # 1) Se existir combobox nomeado por acessibilidade
+        cb = p.get_by_role("combobox", name=re.compile(label_text, re.I))
+        if cb.count() > 0:
+            opener = cb.first
+        else:
+            # 2) Tenta achar o texto do label na página
+            lbl = p.get_by_text(re.compile(rf"\b{re.escape(label_text)}\b", re.I))
+            opener = None
 
-        p.wait_for_timeout(200)
+            if lbl.count() > 0:
+                # tenta achar combobox no mesmo bloco/pai
+                container = lbl.first.locator("xpath=ancestor::div[1]")
+                cb2 = container.get_by_role("combobox")
+                if cb2.count() > 0:
+                    opener = cb2.first
+                else:
+                    # tenta achar combobox imediatamente após o label
+                    cb3 = lbl.first.locator("xpath=following::button[@role='combobox'][1]")
+                    if cb3.count() > 0:
+                        opener = cb3
 
+            # 3) fallback extremo: primeiro combobox da tela
+            if opener is None:
+                any_cb = p.get_by_role("combobox")
+                if any_cb.count() > 0:
+                    opener = any_cb.first
+
+            if opener is None:
+                raise RuntimeError(f"Não encontrei combobox para '{label_text}'.")
+
+        # abre dropdown
+        opener.click()
+        p.wait_for_timeout(250)
+
+        # tenta clicar em opções por diferentes papéis
         candidates = [
             p.get_by_role("option", name=re.compile(re.escape(value), re.I)),
             p.get_by_role("menuitem", name=re.compile(re.escape(value), re.I)),
@@ -380,104 +457,78 @@ class SmacExporter:
         for c in candidates:
             if c.count() > 0:
                 c.first.click()
-                p.wait_for_timeout(300)
+                p.wait_for_timeout(250)
                 return
 
-        if allow_same_label:
-            label.click()
+        # fallback: digita e enter (muitos combobox filtram)
+        if allow_type_and_enter:
+            p.keyboard.type(value)
             p.wait_for_timeout(200)
-            opt = p.get_by_text(re.compile(re.escape(value), re.I))
+            opt = p.get_by_role("option", name=re.compile(re.escape(value), re.I))
             if opt.count() > 0:
                 opt.first.click()
-                p.wait_for_timeout(300)
-                return
+            else:
+                p.keyboard.press("Enter")
+            p.wait_for_timeout(250)
+            return
 
         raise RuntimeError(f"Não consegui selecionar '{value}' no combo '{label_text}'.")
 
     # ---------------- Séries (rodapé) ----------------
 
-    # CORREÇÃO #3: melhorar detecção das séries (mais robusta)
     def list_available_series(self) -> List[str]:
+        """
+        Lista séries clicáveis do rodapé com heurística robusta:
+        - rola até achar "Selecionar Todos" / "Desmarcar Todos"
+        - coleta textos clicáveis no terço inferior
+        """
         p = self.page
 
         sel_all = p.get_by_text(re.compile(r"Selecionar\s+Todos", re.I))
         des_all = p.get_by_text(re.compile(r"Desmarcar\s+Todos", re.I))
 
-        # Tenta trazer para a tela o bloco do gráfico/rodapé
-        for _ in range(6):
+        for _ in range(7):
             if sel_all.count() > 0 or des_all.count() > 0:
                 break
             p.mouse.wheel(0, 900)
             p.wait_for_timeout(250)
 
-        # Blacklist de textos que não são séries
-        blacklist = {
+        blacklist = [
             "Cidade", "Período", "Exportar", "Configurar limiares",
             "Selecionar Todos", "Desmarcar Todos",
             "Modelos", "Horário", "Diário", "Mensal",
             "Habilitar Gráfico", "Habilitar Tabela", "Habilitar Mapas"
-        }
+        ]
 
-        # Se existe um anchor (botões selecionar/desmarcar), tentamos coletar textos clicáveis próximos
-        anchor_js = None
-        if sel_all.count() > 0:
-            anchor_js = sel_all.first
-        elif des_all.count() > 0:
-            anchor_js = des_all.first
+        texts = p.evaluate(
+            """(blacklistArr) => {
+                const blacklist = new Set(blacklistArr.map(x => x.toLowerCase()));
+                const out = new Set();
+                const vpH = window.innerHeight || 800;
+                const minY = vpH * 0.58;
 
-        if anchor_js:
-            # Vamos subir um pouco no DOM para pegar o container do gráfico/legenda
-            container = anchor_js.locator("xpath=ancestor::div[2]")
-            texts = container.evaluate(
-                """(blacklist) => {
-                    const out = new Set();
-                    const ar = this.getBoundingClientRect();
+                const candidates = Array.from(document.querySelectorAll('span, div, label, p, li'));
+                for (const el of candidates) {
+                    const r = el.getBoundingClientRect();
+                    if (!r || r.width < 5 || r.height < 5) continue;
+                    if (r.top < minY) continue;
 
-                    const all = Array.from(document.querySelectorAll('span, div, label, p, li'));
-                    for (const el of all) {
-                        const r = el.getBoundingClientRect();
-                        if (r.width < 5 || r.height < 5) continue;
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (!t || t.length < 2 || t.length > 80) continue;
+                    if (blacklist.has(t.toLowerCase())) continue;
 
-                        // dentro (aproximado) do retângulo do container
-                        if (r.left < ar.left - 5 || r.right > ar.right + 5 || r.top < ar.top - 5 || r.bottom > ar.bottom + 60) continue;
+                    const style = window.getComputedStyle(el);
+                    const clickable = (style.cursor === 'pointer') || !!el.onclick || el.getAttribute('role') === 'button';
+                    if (!clickable) continue;
 
-                        const t = (el.innerText || el.textContent || '').trim();
-                        if (!t || t.length < 2 || t.length > 70) continue;
-                        if (blacklist.has(t)) continue;
+                    out.add(t);
+                }
+                return Array.from(out);
+            }""",
+            blacklist
+        )
 
-                        const style = window.getComputedStyle(el);
-                        const clickable = (style.cursor === 'pointer') || el.getAttribute('role') === 'button' || !!el.onclick;
-                        if (!clickable) continue;
-
-                        out.add(t);
-                    }
-                    return Array.from(out);
-                }""",
-                blacklist
-            )
-        else:
-            # Fallback: varredura genérica na página
-            texts = p.evaluate(
-                """(blacklistArr) => {
-                    const blacklist = new Set(blacklistArr.map(x => x.toLowerCase()));
-                    const out = new Set();
-                    const all = Array.from(document.querySelectorAll('span, div, label, p, li'));
-                    for (const el of all) {
-                        const t = (el.innerText || el.textContent || '').trim();
-                        if (!t || t.length < 2 || t.length > 70) continue;
-                        if (blacklist.has(t.toLowerCase())) continue;
-                        const style = window.getComputedStyle(el);
-                        const clickable = (style.cursor === 'pointer') || !!el.onclick || el.getAttribute('role') === 'button';
-                        if (!clickable) continue;
-                        out.add(t);
-                    }
-                    return Array.from(out);
-                }""",
-                list(blacklist)
-            )
-
-        clean = sorted({t.strip() for t in texts if t and t.strip()})
-        return clean
+        return sorted({t.strip() for t in texts if t and t.strip()})
 
     def set_series(self, series: Union[str, Iterable[str]] = "ALL"):
         p = self.page
@@ -523,7 +574,6 @@ class SmacExporter:
                 not_found.append(name)
 
         if not_found:
-            # fallback para ALL
             if btn_select_all.count() > 0:
                 btn_select_all.first.click()
             print(f"[AVISO] Séries não encontradas no DOM: {not_found}. Fallback: ALL.")
@@ -632,19 +682,17 @@ def main():
         st.subheader("1) Configurações do Relatório")
 
         section = st.selectbox(
-            "Seção no menu ☰ (3 riscos)",
+            "Seção",
             options=["Previsão", "Histórico"],
             index=0,
             help="Previsão abre direto /forecast. Histórico tenta via menu ☰."
         )
 
-        # CORREÇÃO #1: login/senha automáticos (via Secrets)
+        # Credenciais: user default "mrs"; senha via secrets (recomendado)
         st.markdown("**Credenciais (SMAC/Climatempo)**")
-        # Default do usuário (conforme solicitado), senha via secrets por segurança.
         user = st.secrets.get("SMAC_USER", "mrs")
         password = st.secrets.get("SMAC_PASS", "")
 
-        # Expansor opcional para fallback manual se secrets não estiverem setados
         with st.expander("🔐 Ajustar credenciais (opcional)", expanded=False):
             user = st.text_input("Usuário", value=user, placeholder="Usuário do SMAC")
             password = st.text_input("Senha", value=password, type="password", placeholder="Senha do SMAC")
@@ -680,7 +728,7 @@ def main():
 
         st.divider()
 
-        # CORREÇÃO #3: modo manual carrega séries automaticamente
+        # Séries (rodapé)
         st.markdown("**Séries do Rodapé (Legenda)**")
 
         series_mode = st.radio(
@@ -704,7 +752,7 @@ def main():
                         cfg = SmacConfig(headless=True)
                         with SmacExporter(cfg) as ex:
                             ex.login(user, password)
-                            ex.goto_section(section)  # Previsão direto por URL
+                            ex.goto_section(section)
                             ex.set_top_filters(cidade=cidade, unidade=unidade, data_ini=data_ini, data_fim=data_fim)
                             st.session_state.series_available = ex.list_available_series()
 
@@ -725,7 +773,7 @@ def main():
                 key="manual_series"
             )
             if not st.session_state.series_available:
-                st.info("Ainda não há séries carregadas. Use o botão acima ou prossiga com ALL.")
+                st.info("Ainda não há séries carregadas. Use o botão acima ou prossiga com ALL (fallback).")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -734,24 +782,17 @@ def main():
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("2) Executar e Baixar (última etapa)")
 
-        # CORREÇÃO #5: impedir execução antes de definir filtros/credenciais
+        # validação para habilitar execução
         filtros_ok = bool(cidade.strip()) and bool(unidade.strip()) and (dt_fim >= dt_ini)
         creds_ok = bool(user) and bool(password)
-
-        # Se manual, recomenda ter carregado (mas se não, ainda pode rodar com fallback ALL)
-        if series_mode == "Selecionar manualmente":
-            manual_ok = True  # não bloqueia, pois podemos fazer fallback ALL
-        else:
-            manual_ok = True
-
-        ready_to_run = filtros_ok and creds_ok and manual_ok
+        ready_to_run = filtros_ok and creds_ok
 
         if not creds_ok:
             st.warning("Credenciais ausentes. Configure em Secrets ou informe no expansor.")
         if not filtros_ok:
             st.warning("Revise os filtros (Cidade/Unidade/Período).")
 
-        # Botão FINAL em form (sequência natural)
+        # Botão FINAL em form
         with st.form("run_form", clear_on_submit=False):
             headless = st.toggle("Rodar em modo invisível (headless)", value=True)
             submitted = st.form_submit_button(
@@ -787,7 +828,6 @@ def main():
                         if series_mode == "Todas (ALL)":
                             ex.set_series("ALL")
                         else:
-                            # Se manual e vazio: fallback ALL
                             ex.set_series(selected_series if selected_series else "ALL")
 
                         menu = ex.open_settings_menu()
@@ -801,11 +841,9 @@ def main():
                     st.session_state.last_error = str(e)
                     st.error(f"Falha na exportação: {e}")
 
-        # Erros
         if st.session_state.last_error:
             st.error(st.session_state.last_error)
 
-        # Preview + download
         if st.session_state.last_file:
             xlsx_path = Path(st.session_state.last_file)
 
@@ -834,4 +872,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
