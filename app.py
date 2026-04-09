@@ -11,7 +11,6 @@ from typing import Iterable, List, Optional, Union
 
 import streamlit as st
 import pandas as pd
-
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
 
@@ -21,9 +20,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
 @st.cache_resource
 def ensure_playwright_chromium():
-    """
-    Instala o Chromium do Playwright automaticamente (1x por instância do app).
-    """
     sentinel_dir = Path.home() / ".cache" / "mrs_playwright"
     sentinel_dir.mkdir(parents=True, exist_ok=True)
     sentinel_file = sentinel_dir / "chromium_installed.ok"
@@ -44,12 +40,10 @@ def ensure_playwright_chromium():
 
         env = os.environ.copy()
 
-        # headless shell (mais leve)
         cmd = [sys.executable, "-m", "playwright", "install", "chromium", "--only-shell"]
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
         if result.returncode != 0:
-            # fallback Chromium completo
             cmd2 = [sys.executable, "-m", "playwright", "install", "chromium"]
             result2 = subprocess.run(cmd2, env=env, capture_output=True, text=True)
             if result2.returncode != 0:
@@ -61,7 +55,6 @@ def ensure_playwright_chromium():
 
         sentinel_file.write_text("ok", encoding="utf-8")
         return True
-
     finally:
         try:
             if lock_file.exists():
@@ -93,12 +86,10 @@ def inject_css():
                 background: linear-gradient(180deg, {PRIMARY_BLUE} 0%, #052F49 55%, #041F30 100%);
                 color: {WHITE};
             }}
-
             .block-container {{
                 padding-top: 1.2rem;
                 padding-bottom: 2rem;
             }}
-
             .mrs-card {{
                 background: rgba(255,255,255,0.08);
                 border: 1px solid rgba(255,255,255,0.14);
@@ -106,7 +97,6 @@ def inject_css():
                 padding: 16px 18px;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.25);
             }}
-
             .mrs-header {{
                 display: flex;
                 align-items: center;
@@ -118,16 +108,13 @@ def inject_css():
                 padding: 14px 18px;
                 margin-bottom: 18px;
             }}
-
             .mrs-title {{
                 font-size: 30px;
                 font-weight: 800;
-                letter-spacing: 0.5px;
                 margin: 0;
                 color: {WHITE};
                 text-align: center;
             }}
-
             .mrs-subtitle {{
                 font-size: 14px;
                 opacity: 0.92;
@@ -144,12 +131,6 @@ def inject_css():
                 padding: 0.62rem 1rem;
                 font-weight: 800;
                 width: 100%;
-                transition: transform .06s ease-in-out, filter .15s ease-in-out;
-                box-shadow: 0 10px 18px rgba(0,0,0,0.22);
-            }}
-            div.stButton > button:hover {{
-                filter: brightness(1.02);
-                transform: translateY(-1px);
             }}
 
             /* Download */
@@ -160,50 +141,37 @@ def inject_css():
                 border-radius: 10px !important;
             }}
 
-            /* ========= TEXTOS: BRANCO NA ÁREA ESCURA ========= */
-            .mrs-card .stMarkdown, 
-            .mrs-card .stText, 
-            .mrs-card .stCaption,
-            .mrs-card h1, .mrs-card h2, .mrs-card h3, .mrs-card h4,
-            .mrs-card p {{
+            /* Base: tudo branco no card */
+            .mrs-card, .mrs-card * {{
                 color: #FFFFFF !important;
             }}
 
-            /* Rádio: garante branco (Modo de Séries) */
-            div[data-testid="stRadio"] * {{
-                color: #FFFFFF !important;
-            }}
-
-            /* ========= CORREÇÃO DEFINITIVA: Toggles (Gráfico/Tabela/Mapas) ========= */
-            /* Cobre wrappers diferentes do Streamlit/BaseWeb */
-            .mrs-card div[data-testid="stToggle"] *,
-            .mrs-card div[role="switch"] *,
-            .mrs-card div[data-baseweb="base-switch"] *,
-            .mrs-card label[data-testid],
-            .mrs-card label,
-            .mrs-card span {{
-                color: #FFFFFF !important;
-            }}
-
-            /* ========= INPUTS/SELECTS: FUNDO BRANCO, TEXTO PRETO ========= */
-            .stTextInput input, .stDateInput input {{
+            /* Inputs: preto no fundo branco */
+            .mrs-card .stTextInput input,
+            .mrs-card .stDateInput input {{
                 background: #FFFFFF !important;
                 color: {DARK_TEXT} !important;
                 border-radius: 10px !important;
             }}
 
-            /* Select / MultiSelect (Periodicidade e Escolha as séries) */
-            div[data-baseweb="select"] div[role="combobox"] {{
+            /* Select / MultiSelect: preto no fundo branco */
+            .mrs-card div[data-baseweb="select"] div[role="combobox"] {{
                 background: #FFFFFF !important;
                 color: {DARK_TEXT} !important;
                 border-radius: 10px !important;
             }}
-            div[data-baseweb="select"] div[role="combobox"] * {{
+            .mrs-card div[data-baseweb="select"] div[role="combobox"] * {{
+                color: {DARK_TEXT} !important;
+            }}
+            .mrs-card div[data-baseweb="select"] div[role="listbox"] * {{
                 color: {DARK_TEXT} !important;
             }}
 
-            div[data-baseweb="select"] div[role="listbox"] * {{
-                color: {DARK_TEXT} !important;
+            /* Toggle: força branco (texto) */
+            .mrs-card div[data-testid="stToggle"] label,
+            .mrs-card div[data-testid="stToggle"] p,
+            .mrs-card div[data-testid="stToggle"] span {{
+                color: #FFFFFF !important;
             }}
         </style>
         """,
@@ -229,7 +197,35 @@ def build_header():
 
 
 # ============================================================
-# 2) Automação SMAC/Climatempo (Playwright)
+# 2) Séries do SMAC (fixas, conforme seu anexo)
+# ============================================================
+
+SERIES_SMAC = [
+    "Índice de Ångström",
+    "Probabilidade",
+    "Visibilidade Mínima",
+    "Umidade Média",
+    "Pressão MSL Média",
+    "Visibilidade Média",
+    "Umidade Mínima",
+    "Pressão MSL Mínima",
+    "Visibilidade Máxima",
+    "Umidade Máxima",
+    "Pressão MSL Máxima",
+    "Velocidade do vento",
+    "Raios",
+    "Temperatura Média",
+    "Velocidade mínima do vento",
+    "Índice de nível de raios",
+    "Temperatura Mínima",
+    "Velocidade máxima do vento",
+    "Chuva",
+    "Temperatura Máxima",
+]
+
+
+# ============================================================
+# 3) Automação SMAC/Climatempo
 # ============================================================
 
 @dataclass
@@ -245,7 +241,7 @@ class SmacConfig:
 @dataclass
 class ExportOptions:
     modelo: Optional[str] = "CT2W"
-    periodicidade: str = "Diário"  # Horário | Diário | Mensal
+    periodicidade: str = "Diário"
     habilitar_grafico: bool = True
     habilitar_tabela: bool = True
     habilitar_mapas: bool = False
@@ -300,8 +296,6 @@ class SmacExporter:
             self._context = None
             self._page = None
 
-    # ---------------- Login ----------------
-
     def login(self, username: str, password: str):
         p = self.page
         p.goto(f"{self.cfg.base_url}{self.cfg.login_path}", wait_until="domcontentloaded")
@@ -316,274 +310,155 @@ class SmacExporter:
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
 
-    def goto_section(self, section_name: str):
-        """
-        Previsão: vai direto /forecast.
-        Histórico: tenta via menu ☰ (mantido).
-        """
+    # =========================
+    # Menu ☰ (drawer lateral)
+    # =========================
+    def open_nav_drawer(self):
         p = self.page
-        if section_name.lower().startswith("previs"):
-            self.goto_forecast()
-            return
+        # Clique no canto sup esquerdo (ícone ☰)
+        p.mouse.click(18, 70)
+        p.get_by_text(re.compile("Acontece agora|Previsão|Histórico", re.I)).first.wait_for(timeout=8000)
 
+    def goto_section(self, section_name: str):
+        p = self.page
         self.goto_forecast()
-        p.wait_for_timeout(500)
-
-        candidates = [
-            p.locator("button[aria-label*='menu' i]"),
-            p.get_by_role("button", name=re.compile("menu|Menu|☰", re.I)),
-        ]
-        opened = False
-        for c in candidates:
-            if c.count() > 0:
-                c.first.click()
-                opened = True
-                break
-
-        if not opened:
-            p.mouse.click(28, 90)
-            p.wait_for_timeout(300)
-
-        p.wait_for_timeout(600)
-        p.get_by_text(re.compile("Históric|Historico", re.I)).first.click()
+        p.wait_for_timeout(700)
+        self.open_nav_drawer()
+        p.get_by_text(re.compile(rf"^{re.escape(section_name)}$", re.I)).first.click()
         p.wait_for_timeout(900)
 
-    # ---------------- Filtros topo ----------------
-
-    def set_top_filters(self, cidade: str, unidade: Optional[str], data_ini: str, data_fim: str):
+    # =========================
+    # Filtros topo conforme prints
+    # =========================
+    def set_top_filters(self, tipo: str, local: str, data_ini: str, data_fim: str):
         p = self.page
-        datetime.strptime(data_ini, "%d/%m/%Y")
-        datetime.strptime(data_fim, "%d/%m/%Y")
 
-        # Cidade - NOVO: multiestratégia
-        self._select_field_by_label_or_top_input(label="Cidade", value=cidade, top_index=0)
+        # Select tipo (Cidade/Pátio/Pontos Monitorados)
+        self._select_first_dropdown(choose_text=tipo)
 
-        # Unidade - NOVO: multiestratégia (geralmente o segundo campo)
-        if unidade:
-            self._select_field_by_label_or_top_input(label="Alumínio", value=unidade, top_index=1)
+        # Select local (com "Procurar")
+        self._select_second_dropdown(choose_text=local)
 
-        # Período
-        p.get_by_text(re.compile(r"\bPeríodo\b", re.I)).first.click()
+        # Período (inputs + Buscar)
+        self._set_period_and_search(data_ini, data_fim)
+
+    def _select_first_dropdown(self, choose_text: str):
+        p = self.page
+        # O primeiro dropdown mostra "Cidade" por padrão (print).
+        # então clicamos no botão que contém "Cidade" e escolhemos a opção.
+        btn = p.get_by_role("button", name=re.compile(r"^Cidade$", re.I))
+        if btn.count() == 0:
+            btn = p.get_by_text(re.compile(r"^Cidade$", re.I))
+        btn.first.click()
+        p.wait_for_timeout(200)
+        p.get_by_text(re.compile(rf"^{re.escape(choose_text)}$", re.I)).first.click()
+        p.wait_for_timeout(300)
+
+    def _select_second_dropdown(self, choose_text: str):
+        p = self.page
+        # O segundo dropdown mostra "Alumínio" por padrão (print).
+        # tentamos clicar no botão com o texto atual, senão clique por coordenada no 2º dropdown.
+        btn = p.get_by_role("button", name=re.compile(r"Alumínio", re.I))
+        if btn.count() > 0:
+            btn.first.click()
+        else:
+            # fallback coordenada aproximada do 2º select no topo
+            p.mouse.click(650, 155)
+
         p.wait_for_timeout(250)
 
-        filled = False
-        for ph in [re.compile(r"dd\/mm\/aaaa", re.I), re.compile(r"dd\/mm\/yyyy", re.I)]:
-            loc = p.get_by_placeholder(ph)
-            if loc.count() >= 2:
-                loc.nth(0).fill(data_ini)
-                loc.nth(1).fill(data_fim)
-                filled = True
-                break
-
-        if not filled:
-            p.keyboard.type(data_ini)
-            p.keyboard.press("Tab")
-            p.keyboard.type(data_fim)
-
-        for nome in ["Aplicar", "OK", "Confirmar", "Salvar"]:
-            btn = p.get_by_role("button", name=re.compile(nome, re.I))
-            if btn.count() > 0:
-                btn.first.click()
-                break
-        else:
-            p.mouse.click(10, 10)
-
-        p.wait_for_timeout(900)
-
-    def _select_field_by_label_or_top_input(self, label: str, value: str, top_index: int = 0):
-        """
-        Correção definitiva do 'Cidade':
-        - Não assume combobox.
-        - Tenta localizar input/button por label e, se falhar, pega N-ésimo input/select no topo.
-        - Depois digita o valor e confirma (Enter) e tenta clicar na opção pelo texto.
-        """
-        p = self.page
-
-        # 1) tentar input por placeholder/aria/name com "Cidade"
-        patterns = [
-            f"//input[contains(translate(@placeholder,'CIDADE','cidade'),'cidade')]",
-            f"//input[contains(translate(@aria-label,'CIDADE','cidade'),'cidade')]",
-            f"//input[contains(translate(@name,'CIDADE','cidade'),'cidade')]",
-        ]
-        opener = None
-
-        if label.lower().startswith("cidade"):
-            for xp in patterns:
-                loc = p.locator(f"xpath={xp}")
-                if loc.count() > 0:
-                    opener = loc.first
-                    break
-
-        # 2) tentar achar o texto do label e um input/button logo próximo
-        if opener is None:
-            lbl = p.get_by_text(re.compile(rf"\b{re.escape(label)}\b", re.I))
-            if lbl.count() > 0:
-                # tenta input após o label
-                cand = lbl.first.locator("xpath=following::input[1]")
-                if cand.count() > 0:
-                    opener = cand
-                else:
-                    # tenta botão/combobox após o label
-                    cand2 = lbl.first.locator("xpath=following::*[@role='combobox' or self::button][1]")
-                    if cand2.count() > 0:
-                        opener = cand2
-
-        # 3) tentar qualquer combobox visível no topo
-        if opener is None:
-            combos = p.locator("*[role='combobox']")
-            if combos.count() > top_index:
-                opener = combos.nth(top_index)
-
-        # 4) fallback final: inputs visíveis no topo (y < 220)
-        if opener is None:
-            opener = p.locator("input:visible").filter(
-                has_not=p.locator("input[type='password']")
-            )
-            if opener.count() > 0:
-                # escolhe o N-ésimo input visível
-                idx = min(top_index, opener.count() - 1)
-                opener = opener.nth(idx)
-            else:
-                raise RuntimeError(f"Não encontrei campo para '{label}' (input/combobox).")
-
-        # abrir/clicar e preencher
-        try:
-            opener.click()
-        except Exception:
-            # se não clicar, tenta foco via keyboard (raro)
-            p.keyboard.press("Tab")
-
-        p.wait_for_timeout(200)
-
-        # se for input, limpa e digita
-        try:
-            if opener.evaluate("el => el.tagName.toLowerCase()") == "input":
-                opener.fill("")
-                opener.type(value, delay=20)
-            else:
-                # se for combobox/button, digita direto no teclado
-                p.keyboard.type(value, delay=20)
-        except Exception:
-            p.keyboard.type(value, delay=20)
-
-        p.wait_for_timeout(300)
-
-        # tenta clicar numa opção pelo texto (se existir)
-        opt = p.get_by_text(re.compile(re.escape(value), re.I))
-        if opt.count() > 0:
-            opt.first.click()
-        else:
-            p.keyboard.press("Enter")
-
-        p.wait_for_timeout(300)
-
-    # ---------------- Séries (rodapé) ----------------
-
-    def list_available_series(self) -> List[str]:
-        p = self.page
-
-        sel_all = p.get_by_text(re.compile(r"Selecionar\s+Todos", re.I))
-        des_all = p.get_by_text(re.compile(r"Desmarcar\s+Todos", re.I))
-
-        for _ in range(7):
-            if sel_all.count() > 0 or des_all.count() > 0:
-                break
-            p.mouse.wheel(0, 900)
+        search = p.get_by_placeholder(re.compile("Procurar|Pesquisar|Search", re.I))
+        if search.count() > 0:
+            search.first.fill(choose_text)
             p.wait_for_timeout(250)
 
-        blacklist = [
-            "Cidade", "Período", "Exportar", "Configurar limiares",
-            "Selecionar Todos", "Desmarcar Todos",
-            "Modelos", "Horário", "Diário", "Mensal",
-            "Habilitar Gráfico", "Habilitar Tabela", "Habilitar Mapas"
-        ]
+        p.get_by_text(re.compile(rf"^{re.escape(choose_text)}$", re.I)).first.click()
+        p.wait_for_timeout(300)
 
-        texts = p.evaluate(
-            """(blacklistArr) => {
-                const blacklist = new Set(blacklistArr.map(x => x.toLowerCase()));
-                const out = new Set();
-                const vpH = window.innerHeight || 800;
-                const minY = vpH * 0.58;
-
-                const candidates = Array.from(document.querySelectorAll('span, div, label, p, li'));
-                for (const el of candidates) {
-                    const r = el.getBoundingClientRect();
-                    if (!r || r.width < 5 || r.height < 5) continue;
-                    if (r.top < minY) continue;
-
-                    const t = (el.innerText || el.textContent || '').trim();
-                    if (!t || t.length < 2 || t.length > 80) continue;
-                    if (blacklist.has(t.toLowerCase())) continue;
-
-                    const style = window.getComputedStyle(el);
-                    const clickable = (style.cursor === 'pointer') || !!el.onclick || el.getAttribute('role') === 'button';
-                    if (!clickable) continue;
-
-                    out.add(t);
-                }
-                return Array.from(out);
-            }""",
-            blacklist
-        )
-
-        return sorted({t.strip() for t in texts if t and t.strip()})
-
-    def set_series(self, series: Union[str, Iterable[str]] = "ALL"):
+    def _set_period_and_search(self, data_ini: str, data_fim: str):
         p = self.page
-        p.mouse.wheel(0, 1200)
+
+        # botão Período
+        p.get_by_role("button", name=re.compile(r"Per[ií]odo", re.I)).first.click()
         p.wait_for_timeout(250)
 
-        btn_select_all = p.get_by_text(re.compile(r"Selecionar\s+Todos", re.I))
-        btn_unselect_all = p.get_by_text(re.compile(r"Desmarcar\s+Todos", re.I))
+        buscar_btn = p.get_by_role("button", name=re.compile("Buscar", re.I)).first
+        buscar_btn.wait_for(timeout=8000)
 
-        if isinstance(series, str):
-            mode = series.strip().upper()
-            series_list = []
-        else:
-            mode = "LIST"
-            series_list = [str(s).strip() for s in series if str(s).strip()]
+        # inputs dentro do popover
+        pop = buscar_btn.locator("xpath=ancestor::div[2]")
+        inputs = pop.locator("input")
+        if inputs.count() < 2:
+            pop = buscar_btn.locator("xpath=ancestor::div[3]")
+            inputs = pop.locator("input")
+
+        if inputs.count() >= 2:
+            inputs.nth(0).fill(data_ini)
+            inputs.nth(1).fill(data_fim)
+
+        buscar_btn.click()
+        p.wait_for_timeout(900)
+
+    # =========================
+    # SÉRIES - NOVO: aplicar seleção na legenda
+    # =========================
+    def apply_series_selection(self, mode: str, series: Optional[List[str]] = None):
+        """
+        mode: "ALL" ou "MANUAL"
+        series: lista de séries selecionadas (texto exato)
+        """
+        p = self.page
+
+        # rola para legenda
+        p.mouse.wheel(0, 1500)
+        p.wait_for_timeout(300)
+
+        btn_all = p.get_by_text(re.compile(r"Selecionar\s+Todos", re.I))
+        btn_none = p.get_by_text(re.compile(r"Desmarcar\s+Todos", re.I))
 
         if mode == "ALL":
-            if btn_select_all.count() > 0:
-                btn_select_all.first.click()
-                p.wait_for_timeout(250)
+            if btn_all.count() > 0:
+                btn_all.first.click()
+                p.wait_for_timeout(200)
             return
 
-        if mode in ("NONE", "EMPTY"):
-            if btn_unselect_all.count() > 0:
-                btn_unselect_all.first.click()
-                p.wait_for_timeout(250)
-            return
+        # MANUAL
+        if btn_none.count() > 0:
+            btn_none.first.click()
+            p.wait_for_timeout(200)
 
-        if btn_unselect_all.count() > 0:
-            btn_unselect_all.first.click()
-            p.wait_for_timeout(250)
-
+        series = series or []
         not_found = []
-        for name in series_list:
-            loc = p.get_by_text(re.compile(rf"^{re.escape(name)}$", re.I))
+
+        for s in series:
+            # tenta clicar pelo texto da legenda
+            loc = p.get_by_text(re.compile(rf"^{re.escape(s)}$", re.I))
             if loc.count() == 0:
-                loc = p.get_by_text(re.compile(rf"\b{re.escape(name)}\b", re.I))
-            if loc.count() > 0:
-                loc.first.click()
-                p.wait_for_timeout(100)
-            else:
-                not_found.append(name)
+                loc = p.get_by_text(re.compile(re.escape(s), re.I))
+            try:
+                if loc.count() > 0:
+                    loc.first.click(timeout=3000)
+                    p.wait_for_timeout(80)
+                else:
+                    not_found.append(s)
+            except Exception:
+                not_found.append(s)
 
-        if not_found and btn_select_all.count() > 0:
-            btn_select_all.first.click()
-            print(f"[AVISO] Séries não encontradas: {not_found}. Fallback ALL.")
+        # fallback: se algo não encontrado, não quebra o fluxo
+        if not_found:
+            print(f"[AVISO] Não encontrei algumas séries para clicar: {not_found}")
 
-    # ---------------- Engrenagem e export ----------------
-
+    # =========================
+    # Engrenagem / Export
+    # =========================
     def open_settings_menu(self):
         p = self.page
         trigger = p.locator("#basic-button")
         if trigger.count() > 0:
             trigger.first.click()
         else:
-            vp = p.viewport_size
-            p.mouse.click((vp["width"] - 60) if vp else 1200, 110)
+            # fallback clique no ícone ao lado do Período
+            p.mouse.click(950, 155)
 
         menu = p.get_by_role("menu")
         menu.wait_for(state="visible", timeout=10_000)
@@ -602,7 +477,6 @@ class SmacExporter:
                 p.get_by_text(re.compile(rf"^{re.escape(opts.modelo)}$", re.I)).first.click()
 
         menu.locator("label").filter(has_text=re.compile(opts.periodicidade, re.I)).first.click()
-
         self._set_switch(menu, "Habilitar Gráfico", opts.habilitar_grafico)
         self._set_switch(menu, "Habilitar Tabela", opts.habilitar_tabela)
         self._set_switch(menu, "Habilitar Mapas", opts.habilitar_mapas)
@@ -634,7 +508,7 @@ class SmacExporter:
 
 
 # ============================================================
-# 3) Preview Excel
+# 4) Preview Excel
 # ============================================================
 
 def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
@@ -648,12 +522,11 @@ def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
 
 
 # ============================================================
-# 4) App Streamlit
+# 5) App Streamlit
 # ============================================================
 
 def main():
     inject_css()
-
     with st.spinner("Preparando ambiente (Playwright/Chromium)..."):
         ensure_playwright_chromium()
 
@@ -661,8 +534,6 @@ def main():
     build_header()
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if "series_available" not in st.session_state:
-        st.session_state.series_available = []
     if "last_file" not in st.session_state:
         st.session_state.last_file = None
     if "last_error" not in st.session_state:
@@ -674,28 +545,27 @@ def main():
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("1) Configurações do Relatório")
 
-        section = st.selectbox("Seção", options=["Previsão", "Histórico"], index=0)
+        section = st.selectbox("Seção (menu ☰)", options=["Previsão", "Histórico"], index=0)
 
         st.markdown("**Credenciais (SMAC/Climatempo)**")
         user = st.secrets.get("SMAC_USER", "mrs")
         password = st.secrets.get("SMAC_PASS", "")
 
         with st.expander("🔐 Ajustar credenciais (opcional)", expanded=False):
-            user = st.text_input("Usuário", value=user, placeholder="Usuário do SMAC")
-            password = st.text_input("Senha", value=password, type="password", placeholder="Senha do SMAC")
+            user = st.text_input("Usuário", value=user)
+            password = st.text_input("Senha", value=password, type="password")
 
         st.divider()
 
-        st.markdown("**Filtros do Relatório**")
-        cidade = st.text_input("Cidade", value="Juiz de Fora")
-        unidade = st.text_input("Unidade", value="Alumínio")
+        st.markdown("**Filtros do topo (SMAC)**")
+        tipo = st.selectbox("Tipo", ["Cidade", "Pátio", "Pontos Monitorados"], index=0)
+        local = st.text_input("Local", value="Alumínio")
 
         c1, c2 = st.columns(2)
         with c1:
             dt_ini = st.date_input("Data inicial", value=datetime.today())
         with c2:
             dt_fim = st.date_input("Data final", value=datetime.today())
-
         data_ini = dt_ini.strftime("%d/%m/%Y")
         data_fim = dt_fim.strftime("%d/%m/%Y")
 
@@ -716,48 +586,15 @@ def main():
         st.divider()
 
         st.markdown("**Séries do Rodapé (Legenda)**")
-        series_mode = st.radio(
-            "Modo de séries",
-            options=["Todas (ALL)", "Selecionar manualmente"],
-            index=0,
-            horizontal=True
-        )
+        series_mode = st.radio("Modo de séries", ["Todas (ALL)", "Selecionar manualmente"], index=0, horizontal=True)
 
-        reload_series = st.button("🔎 Carregar/Atualizar séries disponíveis", use_container_width=True)
-        auto_load_needed = (series_mode == "Selecionar manualmente" and not st.session_state.series_available)
-
-        if reload_series or auto_load_needed:
-            st.session_state.last_error = None
-            if not user or not password:
-                st.warning("Credenciais ausentes. Configure em Secrets ou informe no expansor.")
-            else:
-                with st.spinner("Detectando séries do rodapé..."):
-                    try:
-                        cfg = SmacConfig(headless=True)
-                        with SmacExporter(cfg) as ex:
-                            ex.login(user, password)
-                            ex.goto_section(section)
-                            ex.set_top_filters(cidade=cidade, unidade=unidade, data_ini=data_ini, data_fim=data_fim)
-                            st.session_state.series_available = ex.list_available_series()
-
-                        if st.session_state.series_available:
-                            st.success(f"Séries detectadas: {len(st.session_state.series_available)}")
-                        else:
-                            st.warning("Não foi possível detectar séries. Você pode seguir com ALL.")
-                    except Exception as e:
-                        st.session_state.last_error = str(e)
-                        st.error(f"Falha ao carregar séries: {e}")
-
-        selected_series: Union[str, List[str]] = "ALL"
+        selected_series: List[str] = []
         if series_mode == "Selecionar manualmente":
             selected_series = st.multiselect(
-                "Escolha as séries",
-                options=st.session_state.series_available,
-                default=[],
-                key="manual_series"
+                "Escolha as séries (SMAC)",
+                options=SERIES_SMAC,
+                default=["Chuva", "Temperatura Média"] if "Chuva" in SERIES_SMAC else []
             )
-            if not st.session_state.series_available:
-                st.info("Ainda não há séries carregadas. Use o botão acima ou prossiga com ALL (fallback).")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -765,28 +602,24 @@ def main():
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("2) Executar e Baixar (última etapa)")
 
-        filtros_ok = bool(cidade.strip()) and bool(unidade.strip()) and (dt_fim >= dt_ini)
+        filtros_ok = bool(local.strip()) and (dt_fim >= dt_ini)
         creds_ok = bool(user) and bool(password)
         ready_to_run = filtros_ok and creds_ok
 
         if not creds_ok:
-            st.warning("Credenciais ausentes. Configure em Secrets ou informe no expansor.")
+            st.warning("Credenciais ausentes. Configure em Secrets (recomendado).")
         if not filtros_ok:
-            st.warning("Revise os filtros (Cidade/Unidade/Período).")
+            st.warning("Revise os filtros (Local/Período).")
 
         with st.form("run_form", clear_on_submit=False):
             headless = st.toggle("Rodar em modo invisível (headless)", value=True)
-            submitted = st.form_submit_button(
-                "🚀 Gerar Relatório e Exportar Excel",
-                disabled=not ready_to_run,
-                use_container_width=True
-            )
+            submitted = st.form_submit_button("🚀 Gerar Relatório e Exportar Excel", disabled=not ready_to_run, use_container_width=True)
 
         if submitted:
             st.session_state.last_error = None
             st.session_state.last_file = None
 
-            with st.spinner("Executando automação (login → seção → filtros → séries → exportar)…"):
+            with st.spinner("Executando automação (login → filtros → séries → exportar)…"):
                 try:
                     cfg = SmacConfig(headless=headless)
                     opts = ExportOptions(
@@ -804,12 +637,12 @@ def main():
                     with SmacExporter(cfg) as ex:
                         ex.login(user, password)
                         ex.goto_section(section)
-                        ex.set_top_filters(cidade=cidade, unidade=unidade, data_ini=data_ini, data_fim=data_fim)
+                        ex.set_top_filters(tipo=tipo, local=local, data_ini=data_ini, data_fim=data_fim)
 
                         if series_mode == "Todas (ALL)":
-                            ex.set_series("ALL")
+                            ex.apply_series_selection("ALL")
                         else:
-                            ex.set_series(selected_series if selected_series else "ALL")
+                            ex.apply_series_selection("MANUAL", selected_series)
 
                         menu = ex.open_settings_menu()
                         ex.apply_export_options(menu, opts)
