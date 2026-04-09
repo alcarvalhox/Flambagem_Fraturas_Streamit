@@ -288,27 +288,42 @@ class SmacExporter:
         p = self.page
         p.goto(f"{self.cfg.base_url}{self.cfg.login_path}", wait_until="domcontentloaded")
         
-        p.get_by_placeholder(re.compile("E-mail|Usuário|Usuario|user|email|login", re.I)).first.fill(username)
-        p.get_by_placeholder(re.compile("Senha|password", re.I)).first.fill(password)
+        # Localiza os campos
+        user_field = p.get_by_placeholder(re.compile("E-mail|Usuário|Usuario|user|email|login", re.I)).first
+        pass_field = p.get_by_placeholder(re.compile("Senha|password", re.I)).first
         
-        # Correção do botão ACESSAR com base no erro anterior
+        # Simula digitação humana (tecla por tecla com atraso) para evitar bloqueios anti-bot
+        user_field.click()
+        user_field.fill("") # Limpa caso tenha algo
+        user_field.type(username, delay=50) # Digita pausadamente
+        
+        pass_field.click()
+        pass_field.fill("")
+        pass_field.type(password, delay=50)
+        
+        p.wait_for_timeout(500) # Pausa dramática para o site "registrar" as teclas
+        
+        # Tenta submeter dando ENTER direto no campo de senha (mais natural)
+        pass_field.press("Enter")
+        p.wait_for_timeout(1000)
+        
+        # Fallback: Se o ENTER não resolveu, clica no botão "Acessar"
         btn = p.get_by_role("button", name=re.compile("Acessar|Entrar|Login", re.I)).first
-        if btn.count() > 0:
+        if btn.count() > 0 and btn.is_visible():
             btn.click()
-        else:
-            p.get_by_text(re.compile("^Acessar$", re.I)).first.click()
             
+        # Verificação de sucesso no Login
         try:
             p.wait_for_url(re.compile(r"(forecast|dashboard|home)"), timeout=15000)
         except PWTimeoutError as e:
             debug_path = Path("debug_login_error.png")
             p.screenshot(path=str(debug_path))
-            st.error("🚨 Falha no Login. O robô não conseguiu acessar o painel principal.")
+            st.error("🚨 O site RECUSOU o login. O robô digitou perfeitamente, mas o SMAC disse que a senha ou usuário estão errados.")
             try:
-                st.image(str(debug_path), caption="Estado da tela após tentativa de login")
+                st.image(str(debug_path), caption="Estado da tela após tentativa de login", use_container_width=True)
             except:
                 pass
-            raise RuntimeError("Credenciais incorretas ou erro no portal SMAC.") from e
+            raise RuntimeError("Credenciais incorretas rejeitadas pelo portal SMAC.") from e
 
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
