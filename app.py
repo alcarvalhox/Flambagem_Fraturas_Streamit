@@ -1,56 +1,104 @@
+import os
+import sys
 import re
 import io
 import time
 import tempfile
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Union, Tuple, Dict, Any
+from typing import Iterable, List, Optional, Union, Tuple, Dict
 
 import streamlit as st
 import pandas as pd
 
-from playwright.sync_api import (
-    sync_playwright,
-    TimeoutError as PWTimeoutError,
-)
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 
 
 # ============================================================
-# 0) Configurações e tema do App
+# 0) Bootstrap: instalar Chromium do Playwright automaticamente
+# ============================================================
+# Por que isso é necessário?
+# - O Playwright (Python) precisa que os binários do browser sejam instalados via "playwright install ...". [2](https://playwright.dev/python/docs/browsers)
+# - No Streamlit Community Cloud, você não roda terminal manualmente; então fazemos runtime install (1x por instância). [3](https://discuss.streamlit.io/t/installing-playwright-on-streamlit-cloud/30979)
+
+@st.cache_resource
+def ensure_playwright_chromium():
+    """
+    Instala o Chromium do Playwright automaticamente (uma vez por instância do app).
+    """
+    # Sentinel para evitar reinstalar se o cache do Streamlit resetar parcialmente
+    sentinel_dir = Path.home() / ".cache" / "mrs_playwright"
+    sentinel_dir.mkdir(parents=True, exist_ok=True)
+    sentinel_file = sentinel_dir / "chromium_installed.ok"
+
+    if sentinel_file.exists():
+        return True
+
+    # "Lock" simples: evita 2 usuários instalarem ao mesmo tempo na mesma instância
+    lock_file = sentinel_dir / "install.lock"
+    start = time.time()
+    while lock_file.exists() and time.time() - start < 120:
+        time.sleep(1.0)
+
+    try:
+        lock_file.write_text("locked", encoding="utf-8")
+    except Exception:
+        # se não conseguir criar lock, segue sem lock
+        pass
+
+    try:
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+        env = os.environ.copy()
+
+        # Dica: você pode fixar o local dos browsers se precisar, mas em geral o cache padrão funciona.
+        # env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Falha ao instalar Chromium do Playwright.\n"
+                f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
+            )
+
+        sentinel_file.write_text("ok", encoding="utf-8")
+        return True
+
+    finally:
+        try:
+            if lock_file.exists():
+                lock_file.unlink()
+        except Exception:
+            pass
+
+
+# ============================================================
+# 1) Configurações visuais do App
 # ============================================================
 
 APP_TITLE = "Painel de Previsões de Flambagens e Fraturas"
 APP_SUBTITLE = "Automação SMAC/Climatempo • Exportação de Relatórios (Previsão / Histórico)"
 
-PRIMARY_BLUE = "#063B5C"     # Azul escuro (base)
-ACCENT_YELLOW = "#F6B300"    # Amarelo (botões)
+PRIMARY_BLUE = "#063B5C"
+ACCENT_YELLOW = "#F6B300"
 WHITE = "#FFFFFF"
-LIGHT_BG = "#F5F7FA"
 
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon="📈",
-    layout="wide",
-)
+st.set_page_config(page_title=APP_TITLE, page_icon="📈", layout="wide")
+
 
 def inject_css():
     st.markdown(
         f"""
         <style>
-            /* Fundo geral */
             .stApp {{
                 background: linear-gradient(180deg, {PRIMARY_BLUE} 0%, #052F49 55%, #041F30 100%);
                 color: {WHITE};
             }}
-
-            /* Remove padding extra superior */
             .block-container {{
                 padding-top: 1.2rem;
                 padding-bottom: 2rem;
             }}
-
-            /* Cards */
             .mrs-card {{
                 background: rgba(255,255,255,0.08);
                 border: 1px solid rgba(255,255,255,0.14);
@@ -58,8 +106,6 @@ def inject_css():
                 padding: 16px 18px;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.25);
             }}
-
-            /* Header superior */
             .mrs-header {{
                 display: flex;
                 align-items: center;
@@ -71,7 +117,6 @@ def inject_css():
                 padding: 14px 18px;
                 margin-bottom: 18px;
             }}
-
             .mrs-title {{
                 font-size: 30px;
                 font-weight: 800;
@@ -80,7 +125,6 @@ def inject_css():
                 color: {WHITE};
                 text-align: center;
             }}
-
             .mrs-subtitle {{
                 font-size: 14px;
                 opacity: 0.92;
@@ -88,7 +132,6 @@ def inject_css():
                 text-align: center;
             }}
 
-            /* Botões Streamlit */
             div.stButton > button {{
                 background: {ACCENT_YELLOW};
                 color: #0B2233;
@@ -105,29 +148,11 @@ def inject_css():
                 transform: translateY(-1px);
             }}
 
-            /* Inputs */
-            .stTextInput input, .stSelectbox div, .stDateInput input {{
-                border-radius: 10px !important;
-            }}
-
-            /* Dataframes */
-            .stDataFrame {{
-                background: {WHITE};
-                border-radius: 12px;
-                padding: 8px;
-            }}
-
-            /* Download button */
             .stDownloadButton > button {{
                 background: #1dd1a1 !important;
                 color: #063B5C !important;
                 font-weight: 900 !important;
                 border-radius: 10px !important;
-            }}
-
-            /* Mensagens */
-            .stAlert {{
-                border-radius: 12px;
             }}
         </style>
         """,
@@ -135,8 +160,25 @@ def inject_css():
     )
 
 
+def build_header():
+    col1, col2, col3 = st.columns([1.2, 4.2, 1.2], vertical_alignment="center")
+    with col1:
+        try:
+            st.image("logo.png", width=90)
+        except Exception:
+            st.caption("logo.png não encontrado")
+    with col2:
+        st.markdown(f"<div class='mrs-title'>{APP_TITLE}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='mrs-subtitle'>{APP_SUBTITLE}</div>", unsafe_allow_html=True)
+    with col3:
+        try:
+            st.image("flambagem.jpg", width=170)
+        except Exception:
+            st.caption("flambagem.jpg não encontrado")
+
+
 # ============================================================
-# 1) Automação SMAC/Climatempo (Playwright)
+# 2) Automação SMAC/Climatempo (Playwright)
 # ============================================================
 
 @dataclass
@@ -145,9 +187,8 @@ class SmacConfig:
     login_path: str = "/login"
     forecast_path: str = "/forecast"
     headless: bool = True
-    timeout_ms: int = 40_000
+    timeout_ms: int = 45_000
     accept_downloads: bool = True
-    debug: bool = False
 
 
 @dataclass
@@ -160,16 +201,6 @@ class ExportOptions:
 
 
 class SmacExporter:
-    """
-    Motor de automação (Playwright) que:
-      - login
-      - navega para seção (Previsão ou Histórico) via menu ☰
-      - aplica filtros topo
-      - seleciona séries do rodapé
-      - configura engrenagem (menu #basic-button)
-      - exporta Excel
-    """
-
     def __init__(self, cfg: Optional[SmacConfig] = None):
         self.cfg = cfg or SmacConfig()
         self._pw = None
@@ -187,7 +218,7 @@ class SmacExporter:
     @property
     def page(self):
         if not self._page:
-            raise RuntimeError("Playwright não iniciado. Use with SmacExporter(...) ou chame start().")
+            raise RuntimeError("Playwright não iniciado.")
         return self._page
 
     def start(self):
@@ -213,68 +244,41 @@ class SmacExporter:
             self._context = None
             self._page = None
 
-    # ---------------- Etapa A: Login ----------------
-
     def login(self, username: str, password: str):
         p = self.page
         p.goto(f"{self.cfg.base_url}{self.cfg.login_path}", wait_until="domcontentloaded")
         p.get_by_placeholder(re.compile("Usuário|Usuario|user|email|login", re.I)).fill(username)
         p.get_by_placeholder(re.compile("Senha|password", re.I)).fill(password)
         p.get_by_role("button", name=re.compile("Entrar|Login|Sign in", re.I)).click()
-
-        # aguarda sair do login
         try:
             p.wait_for_url(re.compile(r".*/(?!login).*"), timeout=20_000)
         except PWTimeoutError:
             p.wait_for_timeout(2_000)
 
-    # ---------------- Etapa B: Ir para Forecast ----------------
-
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
 
-    # ---------------- Etapa C: Menu ☰ (3 riscos) -> Previsão / Histórico ----------------
-
     def goto_section(self, section_name: str):
-        """
-        section_name: "Previsão" ou "Histórico"
-        Estratégia:
-          1) clica no botão do menu ☰ (com aria-label ou por fallback de posição)
-          2) clica no item do menu com o texto (Previsão/Histórico)
-        """
         p = self.page
 
-        # Tentativa 1: botão de menu por aria-label / role
-        menu_btn_candidates = [
+        candidates = [
             p.locator("button[aria-label*='menu' i]"),
-            p.locator("button[aria-label*='Menu' i]"),
             p.get_by_role("button", name=re.compile("menu|Menu|☰", re.I)),
         ]
-
         clicked = False
-        for cand in menu_btn_candidates:
-            if cand.count() > 0:
-                cand.first.click()
+        for c in candidates:
+            if c.count() > 0:
+                c.first.click()
                 clicked = True
                 break
 
-        # Fallback: clique no canto superior esquerdo (onde costuma estar o ☰)
         if not clicked:
-            vp = p.viewport_size
-            if vp:
-                p.mouse.click(28, 90)
-            else:
-                p.mouse.click(28, 90)
+            # fallback: canto sup. esquerdo (onde costuma estar o ☰)
+            p.mouse.click(28, 90)
             p.wait_for_timeout(300)
 
-        # Agora clicar no item do menu
-        # (geralmente aparece um drawer/lista)
         p.get_by_text(re.compile(rf"^{re.escape(section_name)}$", re.I)).first.click()
-
-        # espera a tela atualizar
-        p.wait_for_timeout(1_000)
-
-    # ---------------- Etapa D: Filtros topo ----------------
+        p.wait_for_timeout(900)
 
     def set_top_filters(self, cidade: str, unidade: Optional[str], data_ini: str, data_fim: str):
         p = self.page
@@ -282,11 +286,9 @@ class SmacExporter:
         datetime.strptime(data_fim, "%d/%m/%Y")
 
         self._select_combo_by_label("Cidade", cidade)
-
         if unidade:
             self._select_combo_by_label(unidade, unidade, allow_same_label=True)
 
-        # Período (abre datepicker)
         p.get_by_text(re.compile(r"\bPeríodo\b", re.I)).first.click()
         p.wait_for_timeout(250)
 
@@ -298,7 +300,6 @@ class SmacExporter:
                 loc.nth(1).fill(data_fim)
                 filled = True
                 break
-
         if not filled:
             p.keyboard.type(data_ini)
             p.keyboard.press("Tab")
@@ -316,7 +317,6 @@ class SmacExporter:
 
     def _select_combo_by_label(self, label_text: str, value: str, allow_same_label: bool = False):
         p = self.page
-
         label = p.get_by_text(re.compile(rf"\b{re.escape(label_text)}\b", re.I)).first
         if label.count() == 0:
             label = p.get_by_placeholder(re.compile(label_text, re.I)).first
@@ -334,7 +334,6 @@ class SmacExporter:
             p.get_by_text(re.compile(rf"^{re.escape(value)}$", re.I)),
             p.get_by_text(re.compile(re.escape(value), re.I)),
         ]
-
         for c in candidates:
             if c.count() > 0:
                 c.first.click()
@@ -352,14 +351,7 @@ class SmacExporter:
 
         raise RuntimeError(f"Não consegui selecionar '{value}' no combo '{label_text}'.")
 
-    # ---------------- Etapa E: Séries do rodapé ----------------
-
     def list_available_series(self) -> List[str]:
-        """
-        Lista séries detectadas no rodapé.
-        Como você confirmou que fica em negrito ao hover/click, é DOM clicável.
-        Usamos heurística: elementos com cursor pointer no terço inferior.
-        """
         p = self.page
         p.mouse.wheel(0, 1200)
         p.wait_for_timeout(200)
@@ -407,16 +399,9 @@ class SmacExporter:
             blacklist
         )
 
-        clean = sorted({s.strip() for s in series if s and s.strip()})
-        return clean
+        return sorted({s.strip() for s in series if s and s.strip()})
 
     def set_series(self, series: Union[str, Iterable[str]] = "ALL"):
-        """
-        series:
-          - "ALL": seleciona todas (via botão)
-          - "NONE": desmarca todas
-          - lista: desmarca todas e marca as selecionadas
-        """
         p = self.page
         p.mouse.wheel(0, 1200)
         p.wait_for_timeout(250)
@@ -443,7 +428,6 @@ class SmacExporter:
                 p.wait_for_timeout(250)
             return
 
-        # LIST
         if btn_unselect_all.count() > 0:
             btn_unselect_all.first.click()
             p.wait_for_timeout(250)
@@ -460,12 +444,9 @@ class SmacExporter:
                 not_found.append(name)
 
         if not_found:
-            # fallback para ALL (não quebra pipeline)
             if btn_select_all.count() > 0:
                 btn_select_all.first.click()
             print(f"[AVISO] Séries não encontradas no DOM: {not_found}. Fallback: ALL.")
-
-    # ---------------- Etapa F: Engrenagem (menu #basic-button) e opções ----------------
 
     def open_settings_menu(self):
         p = self.page
@@ -473,12 +454,8 @@ class SmacExporter:
         if trigger.count() > 0:
             trigger.first.click()
         else:
-            # fallback: clique aproximado no botão ao lado de Período
             vp = p.viewport_size
-            if vp:
-                p.mouse.click(vp["width"] - 60, 110)
-            else:
-                p.mouse.click(1200, 110)
+            p.mouse.click((vp["width"] - 60) if vp else 1200, 110)
 
         menu = p.get_by_role("menu")
         menu.wait_for(state="visible", timeout=10_000)
@@ -486,22 +463,17 @@ class SmacExporter:
 
     def apply_export_options(self, menu, opts: ExportOptions):
         p = self.page
-
-        # Modelo (combobox)
         if opts.modelo:
             combo = menu.get_by_role("combobox")
             combo.first.click()
-
             opt = p.get_by_role("option", name=re.compile(re.escape(opts.modelo), re.I))
             if opt.count() > 0:
                 opt.first.click()
             else:
                 p.get_by_text(re.compile(rf"^{re.escape(opts.modelo)}$", re.I)).first.click()
 
-        # Periodicidade (label)
         menu.locator("label").filter(has_text=re.compile(opts.periodicidade, re.I)).first.click()
 
-        # Switches (role=switch + aria-checked)
         self._set_switch(menu, "Habilitar Gráfico", opts.habilitar_grafico)
         self._set_switch(menu, "Habilitar Tabela", opts.habilitar_tabela)
         self._set_switch(menu, "Habilitar Mapas", opts.habilitar_mapas)
@@ -515,8 +487,6 @@ class SmacExporter:
         if is_on != desired:
             sw.click()
             self.page.wait_for_timeout(120)
-
-    # ---------------- Etapa G: Exportar e salvar Excel ----------------
 
     def export_excel(self, menu, out_path: Union[str, Path]) -> Path:
         p = self.page
@@ -534,14 +504,16 @@ class SmacExporter:
         return final_path
 
 
+def _safe_filename(name: str) -> str:
+    name = re.sub(r"[^\w\-\.]+", "_", name, flags=re.UNICODE).strip("_")
+    return name or "export.xlsx"
+
+
 # ============================================================
-# 2) Funções auxiliares do Streamlit (leitura do Excel / UI)
+# 3) Auxiliares do app (preview excel)
 # ============================================================
 
-def read_excel_preview(xlsx_path: Path, max_rows: int = 200) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
-    """
-    Lê todas as abas (se possível) e retorna um dict {sheet: df_preview} + nomes das abas.
-    """
+def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
     xls = pd.ExcelFile(xlsx_path, engine="openpyxl")
     sheets = xls.sheet_names
     data = {}
@@ -551,38 +523,22 @@ def read_excel_preview(xlsx_path: Path, max_rows: int = 200) -> Tuple[Dict[str, 
     return data, sheets
 
 
-def build_header():
-    col1, col2, col3 = st.columns([1.2, 4.2, 1.2], vertical_alignment="center")
-    with col1:
-        # Logo MRS
-        try:
-            st.image("logo.png", width=90)
-        except Exception:
-            st.caption("logo.png não encontrado")
-    with col2:
-        st.markdown(f"<div class='mrs-title'>{APP_TITLE}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='mrs-subtitle'>{APP_SUBTITLE}</div>", unsafe_allow_html=True)
-    with col3:
-        # Imagem do veículo
-        try:
-            st.image("flambagem.jpg", width=170)
-        except Exception:
-            st.caption("flambagem.jpg não encontrado")
-
-
 # ============================================================
-# 3) App Streamlit
+# 4) App Streamlit
 # ============================================================
 
 def main():
     inject_css()
 
-    # Header
+    # 1) Instala Chromium automaticamente na primeira execução do container
+    # (sem isso, Playwright pode falhar por não achar o executável do browser). [2](https://playwright.dev/python/docs/browsers)[3](https://discuss.streamlit.io/t/installing-playwright-on-streamlit-cloud/30979)
+    with st.spinner("Preparando ambiente (Playwright/Chromium)..."):
+        ensure_playwright_chromium()
+
     st.markdown("<div class='mrs-header'>", unsafe_allow_html=True)
     build_header()
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Estado
     if "series_available" not in st.session_state:
         st.session_state.series_available = []
     if "last_file" not in st.session_state:
@@ -590,15 +546,12 @@ def main():
     if "last_error" not in st.session_state:
         st.session_state.last_error = None
 
-    # Layout principal
     left, right = st.columns([2.4, 1.0], gap="large")
 
-    # ---------------- Painel de Configurações (Esquerda) ----------------
     with left:
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("1) Configurações do Relatório")
 
-        # Seção (menu ☰: Previsão ou Histórico)
         section = st.selectbox(
             "Seção no menu ☰ (3 riscos)",
             options=["Previsão", "Histórico"],
@@ -606,17 +559,15 @@ def main():
             help="Escolha qual página o robô deve abrir pelo menu ☰."
         )
 
-        # Credenciais (recomendo usar st.secrets em produção)
         st.markdown("**Credenciais (SMAC/Climatempo)**")
-        user = st.text_input("Usuário", value="", placeholder="Digite seu usuário", key="user")
-        password = st.text_input("Senha", value="", type="password", placeholder="Digite sua senha", key="pass")
+        user = st.text_input("Usuário", value="", placeholder="Digite seu usuário")
+        password = st.text_input("Senha", value="", type="password", placeholder="Digite sua senha")
 
         st.divider()
 
-        # Filtros topo
         st.markdown("**Filtros do Relatório**")
-        cidade = st.text_input("Cidade", value="Juiz de Fora", help="Ex.: Juiz de Fora")
-        unidade = st.text_input("Unidade", value="Alumínio", help="Ex.: Alumínio (se aplicável)")
+        cidade = st.text_input("Cidade", value="Juiz de Fora")
+        unidade = st.text_input("Unidade", value="Alumínio")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -624,13 +575,11 @@ def main():
         with c2:
             dt_fim = st.date_input("Data final", value=datetime.today())
 
-        # Formato DD/MM/AAAA
         data_ini = dt_ini.strftime("%d/%m/%Y")
         data_fim = dt_fim.strftime("%d/%m/%Y")
 
         st.divider()
 
-        # Opções engrenagem (Export)
         st.markdown("**Opções de Exportação (engrenagem)**")
         modelo = st.text_input("Modelo", value="CT2W")
         periodicidade = st.selectbox("Periodicidade", ["Horário", "Diário", "Mensal"], index=1)
@@ -645,17 +594,14 @@ def main():
 
         st.divider()
 
-        # Séries do rodapé
         st.markdown("**Séries do Rodapé (Legenda)**")
         series_mode = st.radio(
             "Modo de séries",
             options=["Todas (ALL)", "Selecionar manualmente"],
             index=0,
-            horizontal=True,
-            help="ALL usa Selecionar Todos. Manual lista e permite escolher."
+            horizontal=True
         )
 
-        # Botão para carregar séries disponíveis (faz uma automação leve até a tela)
         if st.button("🔎 Carregar séries disponíveis", use_container_width=True):
             st.session_state.last_error = None
             if not user or not password:
@@ -663,7 +609,7 @@ def main():
             else:
                 with st.spinner("Abrindo SMAC e detectando séries do rodapé..."):
                     try:
-                        cfg = SmacConfig(headless=True, debug=False)
+                        cfg = SmacConfig(headless=True)
                         with SmacExporter(cfg) as ex:
                             ex.login(user, password)
                             ex.goto_forecast()
@@ -686,28 +632,22 @@ def main():
             selected_series = st.multiselect(
                 "Escolha as séries",
                 options=st.session_state.series_available,
-                default=[],
-                help="Se vazio, o export seguirá com ALL (fallback)."
+                default=[]
             )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---------------- Ações e Resultado (Direita) ----------------
     with right:
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("2) Executar e Baixar")
 
         headless = st.toggle("Rodar em modo invisível (headless)", value=True)
-        debug = st.toggle("Gerar prints de debug", value=False, help="Salva screenshots em caso de falha (útil para suporte).")
 
-        # Botão principal
         run = st.button("🚀 Gerar Relatório e Exportar Excel", use_container_width=True)
 
-        # Status / Erros
         if st.session_state.last_error:
             st.error(st.session_state.last_error)
 
-        # Execução
         if run:
             st.session_state.last_error = None
             st.session_state.last_file = None
@@ -715,9 +655,9 @@ def main():
             if not user or not password:
                 st.warning("Informe Usuário e Senha para executar.")
             else:
-                with st.spinner("Executando automação (login → filtros → séries → exportar)…"):
+                with st.spinner("Executando automação (login → menu → filtros → séries → exportar)…"):
                     try:
-                        cfg = SmacConfig(headless=headless, debug=debug)
+                        cfg = SmacConfig(headless=headless)
                         opts = ExportOptions(
                             modelo=modelo.strip() or None,
                             periodicidade=periodicidade,
@@ -726,7 +666,6 @@ def main():
                             habilitar_mapas=habilitar_mapas
                         )
 
-                        # arquivo temporário
                         tmp_dir = Path(tempfile.gettempdir()) / "mrs_smac_exports"
                         tmp_dir.mkdir(parents=True, exist_ok=True)
                         out_path = tmp_dir / "relatorio.xlsx"
@@ -734,25 +673,16 @@ def main():
                         with SmacExporter(cfg) as ex:
                             ex.login(user, password)
                             ex.goto_forecast()
-
-                            # Menu ☰ -> Previsão / Histórico
                             ex.goto_section(section)
-
-                            # Filtros
                             ex.set_top_filters(cidade=cidade, unidade=unidade, data_ini=data_ini, data_fim=data_fim)
 
-                            # Séries
                             if series_mode == "Todas (ALL)":
                                 ex.set_series("ALL")
                             else:
-                                # se vazio, usa ALL como fallback
                                 ex.set_series(selected_series if selected_series else "ALL")
 
-                            # Engrenagem e opções
                             menu = ex.open_settings_menu()
                             ex.apply_export_options(menu, opts)
-
-                            # Exportar
                             final_file = ex.export_excel(menu, out_path)
 
                         st.session_state.last_file = str(final_file)
@@ -762,7 +692,6 @@ def main():
                         st.session_state.last_error = str(e)
                         st.error(f"Falha na exportação: {e}")
 
-        # Preview + download
         if st.session_state.last_file:
             xlsx_path = Path(st.session_state.last_file)
 
@@ -786,7 +715,6 @@ def main():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Rodapé
     st.caption("MRS • Automação de relatórios SMAC/Climatempo • Previsões de flambagens e fraturas")
 
 
