@@ -154,7 +154,7 @@ def inject_css():
                 opacity: 1 !important;
             }}
 
-            /* EXCEÇÕES: select/multiselect (somente dentro do combobox do select) */
+            /* EXCEÇÕES: select/multiselect */
             .mrs-card div[data-baseweb="select"] div[role="combobox"] {{
                 background: #FFFFFF !important;
                 color: {DARK_TEXT} !important;
@@ -170,7 +170,7 @@ def inject_css():
                 opacity: 1 !important;
             }}
 
-            /* ✅ Correção agressiva para Toggle: força branco e opacity 1 */
+            /* Correção Toggle */
             .mrs-card div[data-testid="stToggle"] *,
             .mrs-card [data-baseweb="base-switch"] *,
             .mrs-card [role="switch"] *,
@@ -209,26 +209,11 @@ def build_header():
 # ============================================================
 
 SERIES_SMAC = [
-    "Índice de Ångström",
-    "Probabilidade",
-    "Visibilidade Mínima",
-    "Umidade Média",
-    "Pressão MSL Média",
-    "Visibilidade Média",
-    "Umidade Mínima",
-    "Pressão MSL Mínima",
-    "Visibilidade Máxima",
-    "Umidade Máxima",
-    "Pressão MSL Máxima",
-    "Velocidade do vento",
-    "Raios",
-    "Temperatura Média",
-    "Velocidade mínima do vento",
-    "Índice de nível de raios",
-    "Temperatura Mínima",
-    "Velocidade máxima do vento",
-    "Chuva",
-    "Temperatura Máxima",
+    "Índice de Ångström", "Probabilidade", "Visibilidade Mínima", "Umidade Média",
+    "Pressão MSL Média", "Visibilidade Média", "Umidade Mínima", "Pressão MSL Mínima",
+    "Visibilidade Máxima", "Umidade Máxima", "Pressão MSL Máxima", "Velocidade do vento",
+    "Raios", "Temperatura Média", "Velocidade mínima do vento", "Índice de nível de raios",
+    "Temperatura Mínima", "Velocidade máxima do vento", "Chuva", "Temperatura Máxima",
 ]
 
 
@@ -312,39 +297,44 @@ class SmacExporter:
         p.get_by_text(re.compile(r"^Histórico$", re.I)).first.click()
         p.wait_for_timeout(900)
 
-    # ---------------- Helpers do topo (CORRIGIDOS) ----------------
-
-    def _topbar_container(self):
-        """
-        Abordagem mais resiliente: procura o container do topo sem depender de contagem exata de DIVs.
-        """
-        p = self.page
-        period_btn = p.locator("button", has_text=re.compile(r"Per[ií]odo", re.I)).first
-        period_btn.wait_for(timeout=20000)
-        return p.locator("body")
+    # ---------------- Helpers do topo (COM DEPURAÇÃO VISUAL) ----------------
 
     def _open_tipo_dropdown(self):
         """
-        Abre o dropdown Tipo. Flexibilizado para aceitar combobox, divs clicáveis, etc.
+        Abre o dropdown Tipo. Flexibilizado e com captura de tela (screenshot) no Streamlit Cloud.
         """
         p = self.page
+        
+        # 1. Espera spinners/loaders de transição sumirem
+        try:
+            p.locator("[class*='loading'], [class*='spinner'], [class*='overlay']").wait_for(state="hidden", timeout=5000)
+        except Exception:
+            pass
+
+        # 2. Busca ampla pelo botão
         btn = p.locator(
-            "button, [role='button'], [role='combobox']"
+            "button, [role='button'], [role='combobox'], div[role='button'], span"
         ).filter(
             has_text=re.compile(r"^(Cidade|Pátio|Patio|Pontos Monitorados|Selecione)$", re.I)
         ).first
 
         try:
-            btn.wait_for(state="visible", timeout=15000)
+            btn.wait_for(state="visible", timeout=20000)
             btn.click()
             p.wait_for_timeout(500)
         except PWTimeoutError as e:
             debug_path = Path("debug_timeout_tipo.png")
             p.screenshot(path=str(debug_path))
+            
+            # --- DEBUG VISUAL DIRETO NA TELA DO APP ---
+            st.error("🚨 ERRO CRÍTICO: O robô não encontrou o botão de 'Tipo'. Veja abaixo o que ele estava enxergando:")
+            try:
+                st.image(str(debug_path), caption="Tela capturada no momento da falha", use_container_width=True)
+            except Exception as img_err:
+                st.warning(f"Não foi possível renderizar a imagem de erro: {img_err}")
+                
             raise RuntimeError(
-                f"Erro de Timeout ao buscar o dropdown 'Tipo'. "
-                f"A estrutura da página pode ter mudado. "
-                f"Um print da tela atual foi salvo em: {debug_path}"
+                f"Erro ao buscar o dropdown 'Tipo'. A estrutura da página mudou ou demorou demais."
             ) from e
 
     def _select_tipo(self, tipo: str):
@@ -353,10 +343,6 @@ class SmacExporter:
         self.page.wait_for_timeout(250)
 
     def _open_local_dropdown(self):
-        """
-        Abre o dropdown Local (direita).
-        Se a estrutura de 2 botões falhar, tenta pelo fallback por coordenada.
-        """
         p = self.page
         try:
             dropdowns = p.locator("button[aria-haspopup='listbox'], [role='combobox']")
@@ -566,7 +552,7 @@ def main():
             if not user or not password:
                 st.warning("Configure credenciais via Secrets.")
             else:
-                with st.spinner("Lendo opções do dropdown Local no SMAC..."):
+                with st.spinner("Navegando no SMAC... Aguarde, isso pode levar alguns segundos."):
                     try:
                         cfg = SmacConfig(headless=True)
                         with SmacExporter(cfg) as ex:
@@ -575,7 +561,7 @@ def main():
                         st.success(f"Opções carregadas: {len(st.session_state.local_options)}")
                     except Exception as e:
                         st.session_state.last_error = str(e)
-                        st.error(f"Falha ao carregar opções: {e}")
+                        # O print de erro principal já será gerado pelo st.error() interno da classe.
 
         if st.session_state.local_options:
             local = st.selectbox("Local", st.session_state.local_options)
@@ -660,10 +646,10 @@ def main():
                     st.success("Relatório exportado com sucesso!")
                 except Exception as e:
                     st.session_state.last_error = str(e)
-                    st.error(f"Falha na exportação: {e}")
+                    # O erro será renderizado caso caia na função _open_tipo_dropdown
 
         if st.session_state.last_error:
-            st.error(st.session_state.last_error)
+            st.error(f"Falha na execução: {st.session_state.last_error}")
 
         if st.session_state.last_file:
             xlsx_path = Path(st.session_state.last_file)
