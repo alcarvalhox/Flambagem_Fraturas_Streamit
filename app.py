@@ -119,7 +119,6 @@ def inject_css():
                 text-align: center;
                 color: {WHITE};
             }}
-
             /* Botões */
             div.stButton > button {{
                 background: {ACCENT_YELLOW};
@@ -130,7 +129,6 @@ def inject_css():
                 font-weight: 800;
                 width: 100%;
             }}
-
             /* Download */
             .stDownloadButton > button {{
                 background: #1dd1a1 !important;
@@ -138,14 +136,12 @@ def inject_css():
                 font-weight: 900 !important;
                 border-radius: 10px !important;
             }}
-
             /* BASE: tudo branco no card */
             .mrs-card, .mrs-card * {{
                 color: #FFFFFF !important;
                 opacity: 1 !important;
             }}
-
-            /* EXCEÇÕES: inputs (fundo branco, texto preto) */
+            /* EXCEÇÕES: inputs */
             .mrs-card .stTextInput input,
             .mrs-card .stDateInput input {{
                 background: #FFFFFF !important;
@@ -153,7 +149,6 @@ def inject_css():
                 border-radius: 10px !important;
                 opacity: 1 !important;
             }}
-
             /* EXCEÇÕES: select/multiselect */
             .mrs-card div[data-baseweb="select"] div[role="combobox"] {{
                 background: #FFFFFF !important;
@@ -169,7 +164,6 @@ def inject_css():
                 color: {DARK_TEXT} !important;
                 opacity: 1 !important;
             }}
-
             /* Correção Toggle */
             .mrs-card div[data-testid="stToggle"] *,
             .mrs-card [data-baseweb="base-switch"] *,
@@ -209,11 +203,26 @@ def build_header():
 # ============================================================
 
 SERIES_SMAC = [
-    "Índice de Ångström", "Probabilidade", "Visibilidade Mínima", "Umidade Média",
-    "Pressão MSL Média", "Visibilidade Média", "Umidade Mínima", "Pressão MSL Mínima",
-    "Visibilidade Máxima", "Umidade Máxima", "Pressão MSL Máxima", "Velocidade do vento",
-    "Raios", "Temperatura Média", "Velocidade mínima do vento", "Índice de nível de raios",
-    "Temperatura Mínima", "Velocidade máxima do vento", "Chuva", "Temperatura Máxima",
+    "Índice de Ångström",
+    "Probabilidade",
+    "Visibilidade Mínima",
+    "Umidade Média",
+    "Pressão MSL Média",
+    "Visibilidade Média",
+    "Umidade Mínima",
+    "Pressão MSL Mínima",
+    "Visibilidade Máxima",
+    "Umidade Máxima",
+    "Pressão MSL Máxima",
+    "Velocidade do vento",
+    "Raios",
+    "Temperatura Média",
+    "Velocidade mínima do vento",
+    "Índice de nível de raios",
+    "Temperatura Mínima",
+    "Velocidade máxima do vento",
+    "Chuva",
+    "Temperatura Máxima",
 ]
 
 
@@ -278,10 +287,28 @@ class SmacExporter:
     def login(self, username: str, password: str):
         p = self.page
         p.goto(f"{self.cfg.base_url}{self.cfg.login_path}", wait_until="domcontentloaded")
-        p.get_by_placeholder(re.compile("Usuário|Usuario|user|email|login", re.I)).fill(username)
-        p.get_by_placeholder(re.compile("Senha|password", re.I)).fill(password)
-        p.get_by_role("button", name=re.compile("Entrar|Login|Sign in", re.I)).click()
-        p.wait_for_timeout(1200)
+        
+        p.get_by_placeholder(re.compile("E-mail|Usuário|Usuario|user|email|login", re.I)).first.fill(username)
+        p.get_by_placeholder(re.compile("Senha|password", re.I)).first.fill(password)
+        
+        # Correção do botão ACESSAR com base no erro anterior
+        btn = p.get_by_role("button", name=re.compile("Acessar|Entrar|Login", re.I)).first
+        if btn.count() > 0:
+            btn.click()
+        else:
+            p.get_by_text(re.compile("^Acessar$", re.I)).first.click()
+            
+        try:
+            p.wait_for_url(re.compile(r"(forecast|dashboard|home)"), timeout=15000)
+        except PWTimeoutError as e:
+            debug_path = Path("debug_login_error.png")
+            p.screenshot(path=str(debug_path))
+            st.error("🚨 Falha no Login. O robô não conseguiu acessar o painel principal.")
+            try:
+                st.image(str(debug_path), caption="Estado da tela após tentativa de login")
+            except:
+                pass
+            raise RuntimeError("Credenciais incorretas ou erro no portal SMAC.") from e
 
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
@@ -297,45 +324,28 @@ class SmacExporter:
         p.get_by_text(re.compile(r"^Histórico$", re.I)).first.click()
         p.wait_for_timeout(900)
 
-    # ---------------- Helpers do topo (COM DEPURAÇÃO VISUAL) ----------------
-
     def _open_tipo_dropdown(self):
-        """
-        Abre o dropdown Tipo. Flexibilizado e com captura de tela (screenshot) no Streamlit Cloud.
-        """
         p = self.page
-        
-        # 1. Espera spinners/loaders de transição sumirem
         try:
-            p.locator("[class*='loading'], [class*='spinner'], [class*='overlay']").wait_for(state="hidden", timeout=5000)
-        except Exception:
+            p.locator("[class*='loading'], [class*='spinner']").wait_for(state="hidden", timeout=5000)
+        except:
             pass
 
-        # 2. Busca ampla pelo botão
-        btn = p.locator(
-            "button, [role='button'], [role='combobox'], div[role='button'], span"
-        ).filter(
+        btn = p.locator("button, [role='button'], [role='combobox']").filter(
             has_text=re.compile(r"^(Cidade|Pátio|Patio|Pontos Monitorados|Selecione)$", re.I)
         ).first
-
+        
         try:
             btn.wait_for(state="visible", timeout=20000)
             btn.click()
             p.wait_for_timeout(500)
         except PWTimeoutError as e:
-            debug_path = Path("debug_timeout_tipo.png")
+            debug_path = Path("debug_tipo_dropdown.png")
             p.screenshot(path=str(debug_path))
-            
-            # --- DEBUG VISUAL DIRETO NA TELA DO APP ---
-            st.error("🚨 ERRO CRÍTICO: O robô não encontrou o botão de 'Tipo'. Veja abaixo o que ele estava enxergando:")
             try:
-                st.image(str(debug_path), caption="Tela capturada no momento da falha", use_container_width=True)
-            except Exception as img_err:
-                st.warning(f"Não foi possível renderizar a imagem de erro: {img_err}")
-                
-            raise RuntimeError(
-                f"Erro ao buscar o dropdown 'Tipo'. A estrutura da página mudou ou demorou demais."
-            ) from e
+                st.image(str(debug_path), caption="Erro ao localizar dropdown 'Tipo'")
+            except: pass
+            raise RuntimeError("Não foi possível localizar o seletor de 'Tipo'.") from e
 
     def _select_tipo(self, tipo: str):
         self._open_tipo_dropdown()
@@ -351,7 +361,7 @@ class SmacExporter:
             else:
                 p.mouse.click(650, 155)
             p.wait_for_timeout(500)
-        except Exception:
+        except:
             p.mouse.click(650, 155)
             p.wait_for_timeout(500)
 
@@ -493,6 +503,7 @@ class SmacExporter:
         return final_path
 
 
+# Função restaurada!
 def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
     xls = pd.ExcelFile(xlsx_path, engine="openpyxl")
     sheets = xls.sheet_names
@@ -528,12 +539,14 @@ def main():
         section = st.selectbox("Seção (menu ☰)", options=["Previsão", "Histórico"], index=0)
 
         st.markdown("**Credenciais (SMAC/Climatempo)**")
-        user = st.secrets.get("SMAC_USER", "mrs")
-        password = st.secrets.get("SMAC_PASS", "")
+        # Puxa do secrets (automático)
+        user_default = st.secrets.get("SMAC_USER", "mrs")
+        pass_default = st.secrets.get("SMAC_PASS", "abmcMRS24!!")
 
+        # Restaurado o expander para edição manual
         with st.expander("🔐 Ajustar credenciais (opcional)", expanded=False):
-            user = st.text_input("Usuário", value=user)
-            password = st.text_input("Senha", value=password, type="password")
+            user = st.text_input("Usuário", value=user_default)
+            password = st.text_input("Senha", value=pass_default, type="password")
 
         st.divider()
 
@@ -561,7 +574,6 @@ def main():
                         st.success(f"Opções carregadas: {len(st.session_state.local_options)}")
                     except Exception as e:
                         st.session_state.last_error = str(e)
-                        # O print de erro principal já será gerado pelo st.error() interno da classe.
 
         if st.session_state.local_options:
             local = st.selectbox("Local", st.session_state.local_options)
@@ -580,11 +592,13 @@ def main():
         with g2:
             habilitar_tabela = st.toggle("Habilitar Tabela", value=True)
         with g3:
+            # Restaurado o botão de mapas
             habilitar_mapas = st.toggle("Habilitar Mapas", value=False)
 
         st.divider()
 
         st.markdown("**Séries do Rodapé (Legenda)**")
+        # Restaurado o rádio e multiselect
         series_mode = st.radio("Modo de séries", ["Todas (ALL)", "Selecionar manualmente"], index=0, horizontal=True)
 
         selected_series: List[str] = []
@@ -633,6 +647,7 @@ def main():
                         ex.goto_section(section)
                         ex.set_top_filters(tipo=tipo, local=local, data_ini=data_ini, data_fim=data_fim)
 
+                        # Aplica a escolha correta de séries (ALL ou MANUAL)
                         if series_mode == "Todas (ALL)":
                             ex.apply_series_selection("ALL")
                         else:
@@ -646,13 +661,14 @@ def main():
                     st.success("Relatório exportado com sucesso!")
                 except Exception as e:
                     st.session_state.last_error = str(e)
-                    # O erro será renderizado caso caia na função _open_tipo_dropdown
 
         if st.session_state.last_error:
             st.error(f"Falha na execução: {st.session_state.last_error}")
 
         if st.session_state.last_file:
             xlsx_path = Path(st.session_state.last_file)
+            
+            # Restaurada a visualização do Dataframe
             st.markdown("**3) Visualização rápida**")
             try:
                 data, sheets = read_excel_preview(xlsx_path, max_rows=150)
