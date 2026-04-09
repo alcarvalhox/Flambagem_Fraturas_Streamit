@@ -264,8 +264,33 @@ class SmacExporter:
 
     def __enter__(self):
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=self.cfg.headless)
-        self._context = self._browser.new_context(accept_downloads=self.cfg.accept_downloads)
+        
+        # 1. Argumentos para enganar sistemas anti-bot básicos
+        browser_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            "--window-size=1920,1080"
+        ]
+        
+        self._browser = self._pw.chromium.launch(
+            headless=self.cfg.headless,
+            args=browser_args
+        )
+        
+        # 2. Falsificando a "Identidade" (User-Agent) do navegador para fingir ser um Windows normal
+        fake_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        
+        self._context = self._browser.new_context(
+            accept_downloads=self.cfg.accept_downloads,
+            user_agent=fake_user_agent,
+            viewport={"width": 1920, "height": 1080}
+        )
+        
+        # 3. Injeta um script na página para apagar os rastros do Playwright
+        self._context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        
         self._page = self._context.new_page()
         self._page.set_default_timeout(self.cfg.timeout_ms)
         return self
