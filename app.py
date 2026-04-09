@@ -302,49 +302,50 @@ class SmacExporter:
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
 
     def goto_section(self, section_name: str):
-        """
-        Previsão = /forecast (não depende de drawer)
-        Histórico ainda não implementado aqui (se precisar, a gente trava pelo HTML do botão ☰).
-        """
         self.goto_forecast()
         self.page.wait_for_timeout(800)
         if section_name.lower().startswith("previs"):
             return
-        # fallback simples: tenta abrir drawer por coordenada (pode ajustar depois)
         p = self.page
         p.mouse.click(18, 70)
         p.wait_for_timeout(400)
         p.get_by_text(re.compile(r"^Histórico$", re.I)).first.click()
         p.wait_for_timeout(900)
 
-    # ---------------- Helpers do topo (corrigidos) ----------------
+    # ---------------- Helpers do topo (CORRIGIDOS) ----------------
 
     def _topbar_container(self):
         """
-        Encontra um container 'estável' no topo, usando o botão 'Período' como âncora.
+        Abordagem mais resiliente: procura o container do topo sem depender de contagem exata de DIVs.
         """
         p = self.page
         period_btn = p.locator("button", has_text=re.compile(r"Per[ií]odo", re.I)).first
-        period_btn.wait_for(timeout=15000)
-        # sobe alguns níveis até achar um container com >= 3 botões
-        for level in range(1, 9):
-            cont = period_btn.locator(f"xpath=ancestor::div[{level}]")
-            if cont.locator("button").count() >= 3:
-                return cont
-        return period_btn.locator("xpath=ancestor::div[1]")
+        period_btn.wait_for(timeout=20000)
+        return p.locator("body")
 
     def _open_tipo_dropdown(self):
         """
-        Abre o dropdown Tipo (Cidade/Pátio/Pontos Monitorados) usando texto visível,
-        sem depender de accessible name.
+        Abre o dropdown Tipo. Flexibilizado para aceitar combobox, divs clicáveis, etc.
         """
         p = self.page
-        cont = self._topbar_container()
-        # botão que contém um destes textos
-        btn = cont.locator("button", has_text=re.compile(r"(Cidade|Pátio|Patio|Pontos Monitorados)", re.I)).first
-        btn.wait_for(timeout=15000)
-        btn.click()
-        p.wait_for_timeout(250)
+        btn = p.locator(
+            "button, [role='button'], [role='combobox']"
+        ).filter(
+            has_text=re.compile(r"^(Cidade|Pátio|Patio|Pontos Monitorados|Selecione)$", re.I)
+        ).first
+
+        try:
+            btn.wait_for(state="visible", timeout=15000)
+            btn.click()
+            p.wait_for_timeout(500)
+        except PWTimeoutError as e:
+            debug_path = Path("debug_timeout_tipo.png")
+            p.screenshot(path=str(debug_path))
+            raise RuntimeError(
+                f"Erro de Timeout ao buscar o dropdown 'Tipo'. "
+                f"A estrutura da página pode ter mudado. "
+                f"Um print da tela atual foi salvo em: {debug_path}"
+            ) from e
 
     def _select_tipo(self, tipo: str):
         self._open_tipo_dropdown()
@@ -354,17 +355,19 @@ class SmacExporter:
     def _open_local_dropdown(self):
         """
         Abre o dropdown Local (direita).
-        Estratégia: no container do topo, pegar o *segundo* botão com chevron (svg).
+        Se a estrutura de 2 botões falhar, tenta pelo fallback por coordenada.
         """
         p = self.page
-        cont = self._topbar_container()
-        btns = cont.locator("button").filter(has=cont.locator("svg"))
-        if btns.count() >= 2:
-            btns.nth(1).click()
-        else:
-            # fallback coordenada
+        try:
+            dropdowns = p.locator("button[aria-haspopup='listbox'], [role='combobox']")
+            if dropdowns.count() >= 2:
+                dropdowns.nth(1).click()
+            else:
+                p.mouse.click(650, 155)
+            p.wait_for_timeout(500)
+        except Exception:
             p.mouse.click(650, 155)
-        p.wait_for_timeout(250)
+            p.wait_for_timeout(500)
 
     def _select_local(self, local: str):
         p = self.page
@@ -401,9 +404,6 @@ class SmacExporter:
         self._set_period_and_search(data_ini, data_fim)
 
     def fetch_local_options(self, tipo: str) -> List[str]:
-        """
-        Lê as opções do dropdown Local após selecionar o Tipo.
-        """
         p = self.page
         self.goto_forecast()
         p.wait_for_timeout(800)
@@ -411,7 +411,6 @@ class SmacExporter:
         self._select_tipo(tipo)
         self._open_local_dropdown()
 
-        # captura opções visíveis
         texts = p.evaluate(
             """() => {
                 const out = new Set();
