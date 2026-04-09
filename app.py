@@ -23,10 +23,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 def ensure_playwright_chromium():
     """
     Instala o Chromium do Playwright automaticamente (1x por instância do app).
-
-    Otimização:
-      - Instala apenas o "headless shell" (mais leve) por padrão.
-      - Se falhar, faz fallback para instalar o Chromium completo.
     """
     sentinel_dir = Path.home() / ".cache" / "mrs_playwright"
     sentinel_dir.mkdir(parents=True, exist_ok=True)
@@ -48,15 +44,14 @@ def ensure_playwright_chromium():
 
         env = os.environ.copy()
 
-        # Tenta instalar headless shell (mais rápido em cloud)
+        # headless shell (mais leve)
         cmd = [sys.executable, "-m", "playwright", "install", "chromium", "--only-shell"]
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
         if result.returncode != 0:
-            # Fallback para Chromium completo
+            # fallback Chromium completo
             cmd2 = [sys.executable, "-m", "playwright", "install", "chromium"]
             result2 = subprocess.run(cmd2, env=env, capture_output=True, text=True)
-
             if result2.returncode != 0:
                 raise RuntimeError(
                     "Falha ao instalar Chromium do Playwright.\n"
@@ -179,8 +174,17 @@ def inject_css():
                 color: #FFFFFF !important;
             }}
 
-            /* Toggle: garante branco (Habilitar...) */
+            /* ========= CORREÇÃO: Toggles (Gráfico/Tabela/Mapas) SEMPRE brancos ========= */
             div[data-testid="stToggle"] * {{
+                color: #FFFFFF !important;
+            }}
+            .mrs-card div[data-baseweb="base-switch"] * {{
+                color: #FFFFFF !important;
+            }}
+            .mrs-card div[data-baseweb="base-switch"] span {{
+                color: #FFFFFF !important;
+            }}
+            .mrs-card div[data-baseweb="base-switch"] label {{
                 color: #FFFFFF !important;
             }}
 
@@ -192,7 +196,7 @@ def inject_css():
                 border-radius: 10px !important;
             }}
 
-            /* Select (combobox) - corrige "Periodicidade" e "Escolha as séries" (multiselect) */
+            /* Select / MultiSelect (Periodicidade e Escolha as séries) */
             div[data-baseweb="select"] div[role="combobox"] {{
                 background: #FFFFFF !important;
                 color: {DARK_TEXT} !important;
@@ -202,13 +206,8 @@ def inject_css():
                 color: {DARK_TEXT} !important;
             }}
 
-            /* Lista dropdown (quando abre) */
+            /* Lista dropdown */
             div[data-baseweb="select"] div[role="listbox"] * {{
-                color: {DARK_TEXT} !important;
-            }}
-
-            /* Remoção de conflitos de cor em spans internos */
-            div[data-baseweb="select"] span {{
                 color: {DARK_TEXT} !important;
             }}
         </style>
@@ -322,10 +321,9 @@ class SmacExporter:
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
 
-    # ---------------- Seção (Previsão / Histórico) ----------------
     def goto_section(self, section_name: str):
         """
-        Previsão: vai direto por URL /forecast (robusto, evita timeout no menu).
+        Previsão: vai direto por URL /forecast (robusto).
         Histórico: tenta via menu ☰.
         """
         p = self.page
@@ -334,11 +332,9 @@ class SmacExporter:
             self.goto_forecast()
             return
 
-        # Garantir que estamos em uma tela com menu (ir para forecast primeiro)
         self.goto_forecast()
         p.wait_for_timeout(500)
 
-        # Histórico -> menu ☰
         candidates = [
             p.locator("button[aria-label*='menu' i]"),
             p.get_by_role("button", name=re.compile("menu|Menu|☰", re.I)),
@@ -355,7 +351,6 @@ class SmacExporter:
             p.wait_for_timeout(300)
 
         p.wait_for_timeout(500)
-
         item = p.get_by_text(re.compile("Históric|Historico", re.I))
         item.first.click()
         p.wait_for_timeout(900)
@@ -367,15 +362,14 @@ class SmacExporter:
         datetime.strptime(data_ini, "%d/%m/%Y")
         datetime.strptime(data_fim, "%d/%m/%Y")
 
-        # Cidade (robusto)
-        self._select_combo("Cidade", cidade)
+        # Cidade (robusto: BaseWeb select ou fallback por ordem)
+        self._select_baseweb_select(label_text="Cidade", value=cidade, ordinal_fallback=0)
 
-        # Unidade
+        # Unidade (geralmente o segundo select)
         if unidade:
-            # Em alguns layouts "Alumínio" é o próprio label visível; tentamos do mesmo jeito
-            self._select_combo(unidade, unidade, allow_type_and_enter=True)
+            self._select_baseweb_select(label_text=unidade, value=unidade, ordinal_fallback=1)
 
-        # Período (abre datepicker)
+        # Período
         p.get_by_text(re.compile(r"\bPeríodo\b", re.I)).first.click()
         p.wait_for_timeout(250)
 
@@ -403,85 +397,71 @@ class SmacExporter:
 
         p.wait_for_timeout(900)
 
-    def _select_combo(self, label_text: str, value: str, allow_type_and_enter: bool = True):
+    def _select_baseweb_select(self, label_text: str, value: str, ordinal_fallback: int = 0):
         """
-        Correção do timeout do 'Cidade':
-        - Não depende de placeholder "Cidade".
-        - Tenta: role=combobox com name (se existir) -> container do label -> combobox dentro/sibling
-        - Seleciona opção por role=option/menuitem/texto e (fallback) digita+Enter.
+        Seleciona um valor em um Select do BaseWeb (o mesmo que Streamlit usa).
+        Correção do erro: "Não encontrei combobox para 'Cidade'".
+
+        Estratégia:
+          1) tenta encontrar um elemento com texto 'Cidade' e, a partir dele, achar um combobox (role=combobox)
+          2) se falhar, usa fallback por ordem: pega o N-ésimo combobox visível (ordinal_fallback)
+          3) após abrir, digita o valor e pressiona Enter (ou clica na opção se aparecer)
         """
         p = self.page
 
-        # 1) Se existir combobox nomeado por acessibilidade
-        cb = p.get_by_role("combobox", name=re.compile(label_text, re.I))
-        if cb.count() > 0:
-            opener = cb.first
-        else:
-            # 2) Tenta achar o texto do label na página
-            lbl = p.get_by_text(re.compile(rf"\b{re.escape(label_text)}\b", re.I))
-            opener = None
+        # 1) localizar texto do label e procurar combobox próximo (BaseWeb)
+        opener = None
+        label = p.get_by_text(re.compile(rf"\b{re.escape(label_text)}\b", re.I))
+        if label.count() > 0:
+            # procurar combobox no mesmo bloco/ancestral
+            # sobe alguns ancestrais até achar um combobox
+            for level in range(1, 6):
+                anc = label.first.locator(f"xpath=ancestor::*[{level}]")
+                cb = anc.locator("div[data-baseweb='select'] div[role='combobox']")
+                if cb.count() > 0:
+                    opener = cb.first
+                    break
 
-            if lbl.count() > 0:
-                # tenta achar combobox no mesmo bloco/pai
-                container = lbl.first.locator("xpath=ancestor::div[1]")
-                cb2 = container.get_by_role("combobox")
+            # fallback: próximo combobox após o label
+            if opener is None:
+                cb2 = label.first.locator("xpath=following::div[@role='combobox'][1]")
                 if cb2.count() > 0:
-                    opener = cb2.first
-                else:
-                    # tenta achar combobox imediatamente após o label
-                    cb3 = lbl.first.locator("xpath=following::button[@role='combobox'][1]")
-                    if cb3.count() > 0:
-                        opener = cb3
+                    opener = cb2
 
-            # 3) fallback extremo: primeiro combobox da tela
-            if opener is None:
-                any_cb = p.get_by_role("combobox")
-                if any_cb.count() > 0:
-                    opener = any_cb.first
+        # 2) fallback por ordem (muito robusto quando não há rótulos acessíveis)
+        if opener is None:
+            all_cb = p.locator("div[data-baseweb='select'] div[role='combobox']")
+            if all_cb.count() > ordinal_fallback:
+                opener = all_cb.nth(ordinal_fallback)
 
-            if opener is None:
-                raise RuntimeError(f"Não encontrei combobox para '{label_text}'.")
+        if opener is None:
+            raise RuntimeError(f"Não encontrei combobox para '{label_text}'.")
 
-        # abre dropdown
         opener.click()
         p.wait_for_timeout(250)
 
-        # tenta clicar em opções por diferentes papéis
-        candidates = [
-            p.get_by_role("option", name=re.compile(re.escape(value), re.I)),
-            p.get_by_role("menuitem", name=re.compile(re.escape(value), re.I)),
-            p.get_by_text(re.compile(rf"^{re.escape(value)}$", re.I)),
-            p.get_by_text(re.compile(re.escape(value), re.I)),
-        ]
-
-        for c in candidates:
-            if c.count() > 0:
-                c.first.click()
-                p.wait_for_timeout(250)
-                return
-
-        # fallback: digita e enter (muitos combobox filtram)
-        if allow_type_and_enter:
-            p.keyboard.type(value)
+        # 3) selecionar opção
+        # tenta clicar na opção se existir
+        opt = p.get_by_role("option", name=re.compile(re.escape(value), re.I))
+        if opt.count() > 0:
+            opt.first.click()
             p.wait_for_timeout(200)
-            opt = p.get_by_role("option", name=re.compile(re.escape(value), re.I))
-            if opt.count() > 0:
-                opt.first.click()
-            else:
-                p.keyboard.press("Enter")
-            p.wait_for_timeout(250)
             return
 
-        raise RuntimeError(f"Não consegui selecionar '{value}' no combo '{label_text}'.")
+        # fallback: digita e enter
+        p.keyboard.type(value)
+        p.wait_for_timeout(200)
+        opt2 = p.get_by_role("option", name=re.compile(re.escape(value), re.I))
+        if opt2.count() > 0:
+            opt2.first.click()
+        else:
+            p.keyboard.press("Enter")
+
+        p.wait_for_timeout(250)
 
     # ---------------- Séries (rodapé) ----------------
 
     def list_available_series(self) -> List[str]:
-        """
-        Lista séries clicáveis do rodapé com heurística robusta:
-        - rola até achar "Selecionar Todos" / "Desmarcar Todos"
-        - coleta textos clicáveis no terço inferior
-        """
         p = self.page
 
         sel_all = p.get_by_text(re.compile(r"Selecionar\s+Todos", re.I))
@@ -557,7 +537,6 @@ class SmacExporter:
                 p.wait_for_timeout(250)
             return
 
-        # LIST
         if btn_unselect_all.count() > 0:
             btn_unselect_all.first.click()
             p.wait_for_timeout(250)
@@ -658,7 +637,6 @@ def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
 def main():
     inject_css()
 
-    # Prepara Playwright/Chromium
     with st.spinner("Preparando ambiente (Playwright/Chromium)..."):
         ensure_playwright_chromium()
 
@@ -666,7 +644,6 @@ def main():
     build_header()
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Session State
     if "series_available" not in st.session_state:
         st.session_state.series_available = []
     if "last_file" not in st.session_state:
@@ -676,7 +653,6 @@ def main():
 
     left, right = st.columns([2.4, 1.0], gap="large")
 
-    # ---------------- Painel Esquerdo (configuração) ----------------
     with left:
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("1) Configurações do Relatório")
@@ -684,11 +660,9 @@ def main():
         section = st.selectbox(
             "Seção",
             options=["Previsão", "Histórico"],
-            index=0,
-            help="Previsão abre direto /forecast. Histórico tenta via menu ☰."
+            index=0
         )
 
-        # Credenciais: user default "mrs"; senha via secrets (recomendado)
         st.markdown("**Credenciais (SMAC/Climatempo)**")
         user = st.secrets.get("SMAC_USER", "mrs")
         password = st.secrets.get("SMAC_PASS", "")
@@ -728,7 +702,6 @@ def main():
 
         st.divider()
 
-        # Séries (rodapé)
         st.markdown("**Séries do Rodapé (Legenda)**")
 
         series_mode = st.radio(
@@ -743,7 +716,6 @@ def main():
 
         if reload_series or auto_load_needed:
             st.session_state.last_error = None
-
             if not user or not password:
                 st.warning("Credenciais ausentes. Configure em Secrets ou informe no expansor.")
             else:
@@ -777,12 +749,10 @@ def main():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---------------- Painel Direito (execução FINAL + preview + download) ----------------
     with right:
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("2) Executar e Baixar (última etapa)")
 
-        # validação para habilitar execução
         filtros_ok = bool(cidade.strip()) and bool(unidade.strip()) and (dt_fim >= dt_ini)
         creds_ok = bool(user) and bool(password)
         ready_to_run = filtros_ok and creds_ok
@@ -792,7 +762,6 @@ def main():
         if not filtros_ok:
             st.warning("Revise os filtros (Cidade/Unidade/Período).")
 
-        # Botão FINAL em form
         with st.form("run_form", clear_on_submit=False):
             headless = st.toggle("Rodar em modo invisível (headless)", value=True)
             submitted = st.form_submit_button(
