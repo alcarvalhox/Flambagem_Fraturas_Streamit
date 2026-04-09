@@ -203,26 +203,11 @@ def build_header():
 # ============================================================
 
 SERIES_SMAC = [
-    "Índice de Ångström",
-    "Probabilidade",
-    "Visibilidade Mínima",
-    "Umidade Média",
-    "Pressão MSL Média",
-    "Visibilidade Média",
-    "Umidade Mínima",
-    "Pressão MSL Mínima",
-    "Visibilidade Máxima",
-    "Umidade Máxima",
-    "Pressão MSL Máxima",
-    "Velocidade do vento",
-    "Raios",
-    "Temperatura Média",
-    "Velocidade mínima do vento",
-    "Índice de nível de raios",
-    "Temperatura Mínima",
-    "Velocidade máxima do vento",
-    "Chuva",
-    "Temperatura Máxima",
+    "Índice de Ångström", "Probabilidade", "Visibilidade Mínima", "Umidade Média",
+    "Pressão MSL Média", "Visibilidade Média", "Umidade Mínima", "Pressão MSL Mínima",
+    "Visibilidade Máxima", "Umidade Máxima", "Pressão MSL Máxima", "Velocidade do vento",
+    "Raios", "Temperatura Média", "Velocidade mínima do vento", "Índice de nível de raios",
+    "Temperatura Mínima", "Velocidade máxima do vento", "Chuva", "Temperatura Máxima",
 ]
 
 
@@ -265,7 +250,7 @@ class SmacExporter:
     def __enter__(self):
         self._pw = sync_playwright().start()
         
-        # 1. Argumentos para enganar sistemas anti-bot básicos
+        # Disfarce anti-bot
         browser_args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-infobars",
@@ -277,7 +262,6 @@ class SmacExporter:
             args=browser_args
         )
         
-        # 2. Falsificando a "Identidade" (User-Agent) do navegador para fingir ser um Windows normal
         fake_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         
         self._context = self._browser.new_context(
@@ -286,7 +270,6 @@ class SmacExporter:
             viewport={"width": 1920, "height": 1080}
         )
         
-        # 3. Injeta um script na página para apagar os rastros do Playwright
         self._context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
@@ -313,42 +296,37 @@ class SmacExporter:
         p = self.page
         p.goto(f"{self.cfg.base_url}{self.cfg.login_path}", wait_until="domcontentloaded")
         
-        # Localiza os campos
         user_field = p.get_by_placeholder(re.compile("E-mail|Usuário|Usuario|user|email|login", re.I)).first
         pass_field = p.get_by_placeholder(re.compile("Senha|password", re.I)).first
         
-        # Simula digitação humana (tecla por tecla com atraso) para evitar bloqueios anti-bot
+        # Simula digitação humana
         user_field.click()
-        user_field.fill("") # Limpa caso tenha algo
-        user_field.type(username, delay=50) # Digita pausadamente
+        user_field.fill("")
+        user_field.type(username, delay=50)
         
         pass_field.click()
         pass_field.fill("")
         pass_field.type(password, delay=50)
         
-        p.wait_for_timeout(500) # Pausa dramática para o site "registrar" as teclas
-        
-        # Tenta submeter dando ENTER direto no campo de senha (mais natural)
+        p.wait_for_timeout(500)
         pass_field.press("Enter")
         p.wait_for_timeout(1000)
         
-        # Fallback: Se o ENTER não resolveu, clica no botão "Acessar"
         btn = p.get_by_role("button", name=re.compile("Acessar|Entrar|Login", re.I)).first
         if btn.count() > 0 and btn.is_visible():
             btn.click()
             
-        # Verificação de sucesso no Login
         try:
             p.wait_for_url(re.compile(r"(forecast|dashboard|home)"), timeout=15000)
         except PWTimeoutError as e:
             debug_path = Path("debug_login_error.png")
             p.screenshot(path=str(debug_path))
-            st.error("🚨 O site RECUSOU o login. O robô digitou perfeitamente, mas o SMAC disse que a senha ou usuário estão errados.")
+            st.error("🚨 O site RECUSOU o login. Certifique-se que as credenciais estão corretas. Se estiverem, a Climatempo está a bloquear o acesso deste servidor.")
             try:
                 st.image(str(debug_path), caption="Estado da tela após tentativa de login", use_container_width=True)
             except:
                 pass
-            raise RuntimeError("Credenciais incorretas rejeitadas pelo portal SMAC.") from e
+            raise RuntimeError("Credenciais rejeitadas pelo portal SMAC.") from e
 
     def goto_forecast(self):
         self.page.goto(f"{self.cfg.base_url}{self.cfg.forecast_path}", wait_until="networkidle")
@@ -543,7 +521,6 @@ class SmacExporter:
         return final_path
 
 
-# Função restaurada!
 def read_excel_preview(xlsx_path: Path, max_rows: int = 200):
     xls = pd.ExcelFile(xlsx_path, engine="openpyxl")
     sheets = xls.sheet_names
@@ -574,23 +551,21 @@ def main():
 
     with left:
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
-        st.subheader("1) Configurações do Relatório")
-
-        section = st.selectbox("Seção (menu ☰)", options=["Previsão", "Histórico"], index=0)
-
-        st.markdown("**Credenciais (SMAC/Climatempo)**")
-        # Puxa do secrets (automático)
-        user_default = st.secrets.get("SMAC_USER", "mrs")
-        pass_default = st.secrets.get("SMAC_PASS", "abmcMRS24!!")
-
-        # Restaurado o expander para edição manual
-        with st.expander("🔐 Ajustar credenciais (opcional)", expanded=False):
-            user = st.text_input("Usuário", value=user_default)
-            password = st.text_input("Senha", value=pass_default, type="password")
-
+        st.subheader("1) Credenciais (SMAC/Climatempo)")
+        
+        # --- ENTRADA MANUAL E OBRIGATÓRIA DE CREDENCIAIS ---
+        st.info("Por favor, introduza as suas credenciais para aceder ao portal SMAC.")
+        col_user, col_pass = st.columns(2)
+        with col_user:
+            user_input = st.text_input("Usuário / E-mail")
+        with col_pass:
+            password_input = st.text_input("Senha", type="password")
+            
         st.divider()
 
-        st.markdown("**Filtros do topo (SMAC)**")
+        st.subheader("2) Configurações do Relatório")
+        section = st.selectbox("Seção (menu ☰)", options=["Previsão", "Histórico"], index=0)
+
         tipo = st.selectbox("Tipo", ["Cidade", "Pátio", "Pontos Monitorados"], index=0)
 
         c1, c2 = st.columns(2)
@@ -601,19 +576,23 @@ def main():
         data_ini = dt_ini.strftime("%d/%m/%Y")
         data_fim = dt_fim.strftime("%d/%m/%Y")
 
-        if st.button("📥 Carregar opções do SMAC (Local)", use_container_width=True):
-            if not user or not password:
-                st.warning("Configure credenciais via Secrets.")
-            else:
-                with st.spinner("Navegando no SMAC... Aguarde, isso pode levar alguns segundos."):
-                    try:
-                        cfg = SmacConfig(headless=True)
-                        with SmacExporter(cfg) as ex:
-                            ex.login(user, password)
-                            st.session_state.local_options = ex.fetch_local_options(tipo=tipo)
-                        st.success(f"Opções carregadas: {len(st.session_state.local_options)}")
-                    except Exception as e:
-                        st.session_state.last_error = str(e)
+        # Impede ação se as credenciais estiverem vazias
+        if not user_input or not password_input:
+            st.warning("Preencha o Usuário e a Senha acima para carregar as opções.")
+            btn_disabled = True
+        else:
+            btn_disabled = False
+
+        if st.button("📥 Carregar opções do SMAC (Local)", use_container_width=True, disabled=btn_disabled):
+            with st.spinner("Navegando no SMAC... Aguarde, isso pode levar alguns segundos."):
+                try:
+                    cfg = SmacConfig(headless=True)
+                    with SmacExporter(cfg) as ex:
+                        ex.login(user_input, password_input)
+                        st.session_state.local_options = ex.fetch_local_options(tipo=tipo)
+                    st.success(f"Opções carregadas: {len(st.session_state.local_options)}")
+                except Exception as e:
+                    st.session_state.last_error = str(e)
 
         if st.session_state.local_options:
             local = st.selectbox("Local", st.session_state.local_options)
@@ -632,13 +611,11 @@ def main():
         with g2:
             habilitar_tabela = st.toggle("Habilitar Tabela", value=True)
         with g3:
-            # Restaurado o botão de mapas
             habilitar_mapas = st.toggle("Habilitar Mapas", value=False)
 
         st.divider()
 
         st.markdown("**Séries do Rodapé (Legenda)**")
-        # Restaurado o rádio e multiselect
         series_mode = st.radio("Modo de séries", ["Todas (ALL)", "Selecionar manualmente"], index=0, horizontal=True)
 
         selected_series: List[str] = []
@@ -649,20 +626,20 @@ def main():
 
     with right:
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
-        st.subheader("2) Executar e Baixar (última etapa)")
+        st.subheader("3) Executar e Baixar")
 
         filtros_ok = bool(local.strip()) and (dt_fim >= dt_ini)
-        creds_ok = bool(user) and bool(password)
+        creds_ok = bool(user_input) and bool(password_input)
         ready = filtros_ok and creds_ok
 
         if not creds_ok:
-            st.warning("Credenciais ausentes. Configure via Secrets.")
-        if not filtros_ok:
+            st.warning("Credenciais pendentes.")
+        elif not filtros_ok:
             st.warning("Revise Local/Período.")
 
         with st.form("run_form", clear_on_submit=False):
-            headless = st.toggle("Rodar em modo invisível (headless)", value=True)
-            submitted = st.form_submit_button("🚀 Gerar Relatório e Exportar Excel", disabled=not ready, use_container_width=True)
+            headless = st.toggle("Rodar em modo invisível", value=True)
+            submitted = st.form_submit_button("🚀 Gerar e Exportar", disabled=not ready, use_container_width=True)
 
         if submitted:
             st.session_state.last_error = None
@@ -683,11 +660,10 @@ def main():
                     out_path = tmp_dir / "relatorio.xlsx"
 
                     with SmacExporter(cfg) as ex:
-                        ex.login(user, password)
+                        ex.login(user_input, password_input)
                         ex.goto_section(section)
                         ex.set_top_filters(tipo=tipo, local=local, data_ini=data_ini, data_fim=data_fim)
 
-                        # Aplica a escolha correta de séries (ALL ou MANUAL)
                         if series_mode == "Todas (ALL)":
                             ex.apply_series_selection("ALL")
                         else:
@@ -698,26 +674,25 @@ def main():
                         final_file = ex.export_excel(menu, out_path)
 
                     st.session_state.last_file = str(final_file)
-                    st.success("Relatório exportado com sucesso!")
+                    st.success("Sucesso!")
                 except Exception as e:
                     st.session_state.last_error = str(e)
 
         if st.session_state.last_error:
-            st.error(f"Falha na execução: {st.session_state.last_error}")
+            st.error(f"Falha: {st.session_state.last_error}")
 
         if st.session_state.last_file:
             xlsx_path = Path(st.session_state.last_file)
             
-            # Restaurada a visualização do Dataframe
-            st.markdown("**3) Visualização rápida**")
+            st.markdown("**Visualização rápida**")
             try:
                 data, sheets = read_excel_preview(xlsx_path, max_rows=150)
-                sheet = st.selectbox("Aba do Excel", options=sheets, index=0, key="sheet_select")
+                sheet = st.selectbox("Aba", options=sheets, index=0, key="sheet_select")
                 st.dataframe(data[sheet], use_container_width=True, height=320)
             except Exception as e:
-                st.warning(f"Não foi possível pré-visualizar: {e}")
+                st.warning(f"Pré-visualização indisponível: {e}")
 
-            st.markdown("**4) Download do Excel**")
+            st.markdown("**Download**")
             st.download_button(
                 label="⬇️ Baixar Excel",
                 data=xlsx_path.read_bytes(),
