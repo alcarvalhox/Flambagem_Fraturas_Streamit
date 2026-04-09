@@ -165,7 +165,7 @@ def inject_css():
             .mrs-card .stText, 
             .mrs-card .stCaption,
             .mrs-card h1, .mrs-card h2, .mrs-card h3, .mrs-card h4,
-            .mrs-card p, .mrs-card label {{
+            .mrs-card p {{
                 color: #FFFFFF !important;
             }}
 
@@ -174,22 +174,18 @@ def inject_css():
                 color: #FFFFFF !important;
             }}
 
-            /* ========= CORREÇÃO: Toggles (Gráfico/Tabela/Mapas) SEMPRE brancos ========= */
-            div[data-testid="stToggle"] * {{
-                color: #FFFFFF !important;
-            }}
-            .mrs-card div[data-baseweb="base-switch"] * {{
-                color: #FFFFFF !important;
-            }}
-            .mrs-card div[data-baseweb="base-switch"] span {{
-                color: #FFFFFF !important;
-            }}
-            .mrs-card div[data-baseweb="base-switch"] label {{
+            /* ========= CORREÇÃO DEFINITIVA: Toggles (Gráfico/Tabela/Mapas) ========= */
+            /* Cobre wrappers diferentes do Streamlit/BaseWeb */
+            .mrs-card div[data-testid="stToggle"] *,
+            .mrs-card div[role="switch"] *,
+            .mrs-card div[data-baseweb="base-switch"] *,
+            .mrs-card label[data-testid],
+            .mrs-card label,
+            .mrs-card span {{
                 color: #FFFFFF !important;
             }}
 
             /* ========= INPUTS/SELECTS: FUNDO BRANCO, TEXTO PRETO ========= */
-            /* Text input e Date input */
             .stTextInput input, .stDateInput input {{
                 background: #FFFFFF !important;
                 color: {DARK_TEXT} !important;
@@ -206,7 +202,6 @@ def inject_css():
                 color: {DARK_TEXT} !important;
             }}
 
-            /* Lista dropdown */
             div[data-baseweb="select"] div[role="listbox"] * {{
                 color: {DARK_TEXT} !important;
             }}
@@ -323,11 +318,10 @@ class SmacExporter:
 
     def goto_section(self, section_name: str):
         """
-        Previsão: vai direto por URL /forecast (robusto).
-        Histórico: tenta via menu ☰.
+        Previsão: vai direto /forecast.
+        Histórico: tenta via menu ☰ (mantido).
         """
         p = self.page
-
         if section_name.lower().startswith("previs"):
             self.goto_forecast()
             return
@@ -350,9 +344,8 @@ class SmacExporter:
             p.mouse.click(28, 90)
             p.wait_for_timeout(300)
 
-        p.wait_for_timeout(500)
-        item = p.get_by_text(re.compile("Históric|Historico", re.I))
-        item.first.click()
+        p.wait_for_timeout(600)
+        p.get_by_text(re.compile("Históric|Historico", re.I)).first.click()
         p.wait_for_timeout(900)
 
     # ---------------- Filtros topo ----------------
@@ -362,12 +355,12 @@ class SmacExporter:
         datetime.strptime(data_ini, "%d/%m/%Y")
         datetime.strptime(data_fim, "%d/%m/%Y")
 
-        # Cidade (robusto: BaseWeb select ou fallback por ordem)
-        self._select_baseweb_select(label_text="Cidade", value=cidade, ordinal_fallback=0)
+        # Cidade - NOVO: multiestratégia
+        self._select_field_by_label_or_top_input(label="Cidade", value=cidade, top_index=0)
 
-        # Unidade (geralmente o segundo select)
+        # Unidade - NOVO: multiestratégia (geralmente o segundo campo)
         if unidade:
-            self._select_baseweb_select(label_text=unidade, value=unidade, ordinal_fallback=1)
+            self._select_field_by_label_or_top_input(label="Alumínio", value=unidade, top_index=1)
 
         # Período
         p.get_by_text(re.compile(r"\bPeríodo\b", re.I)).first.click()
@@ -397,67 +390,92 @@ class SmacExporter:
 
         p.wait_for_timeout(900)
 
-    def _select_baseweb_select(self, label_text: str, value: str, ordinal_fallback: int = 0):
+    def _select_field_by_label_or_top_input(self, label: str, value: str, top_index: int = 0):
         """
-        Seleciona um valor em um Select do BaseWeb (o mesmo que Streamlit usa).
-        Correção do erro: "Não encontrei combobox para 'Cidade'".
-
-        Estratégia:
-          1) tenta encontrar um elemento com texto 'Cidade' e, a partir dele, achar um combobox (role=combobox)
-          2) se falhar, usa fallback por ordem: pega o N-ésimo combobox visível (ordinal_fallback)
-          3) após abrir, digita o valor e pressiona Enter (ou clica na opção se aparecer)
+        Correção definitiva do 'Cidade':
+        - Não assume combobox.
+        - Tenta localizar input/button por label e, se falhar, pega N-ésimo input/select no topo.
+        - Depois digita o valor e confirma (Enter) e tenta clicar na opção pelo texto.
         """
         p = self.page
 
-        # 1) localizar texto do label e procurar combobox próximo (BaseWeb)
+        # 1) tentar input por placeholder/aria/name com "Cidade"
+        patterns = [
+            f"//input[contains(translate(@placeholder,'CIDADE','cidade'),'cidade')]",
+            f"//input[contains(translate(@aria-label,'CIDADE','cidade'),'cidade')]",
+            f"//input[contains(translate(@name,'CIDADE','cidade'),'cidade')]",
+        ]
         opener = None
-        label = p.get_by_text(re.compile(rf"\b{re.escape(label_text)}\b", re.I))
-        if label.count() > 0:
-            # procurar combobox no mesmo bloco/ancestral
-            # sobe alguns ancestrais até achar um combobox
-            for level in range(1, 6):
-                anc = label.first.locator(f"xpath=ancestor::*[{level}]")
-                cb = anc.locator("div[data-baseweb='select'] div[role='combobox']")
-                if cb.count() > 0:
-                    opener = cb.first
+
+        if label.lower().startswith("cidade"):
+            for xp in patterns:
+                loc = p.locator(f"xpath={xp}")
+                if loc.count() > 0:
+                    opener = loc.first
                     break
 
-            # fallback: próximo combobox após o label
-            if opener is None:
-                cb2 = label.first.locator("xpath=following::div[@role='combobox'][1]")
-                if cb2.count() > 0:
-                    opener = cb2
-
-        # 2) fallback por ordem (muito robusto quando não há rótulos acessíveis)
+        # 2) tentar achar o texto do label e um input/button logo próximo
         if opener is None:
-            all_cb = p.locator("div[data-baseweb='select'] div[role='combobox']")
-            if all_cb.count() > ordinal_fallback:
-                opener = all_cb.nth(ordinal_fallback)
+            lbl = p.get_by_text(re.compile(rf"\b{re.escape(label)}\b", re.I))
+            if lbl.count() > 0:
+                # tenta input após o label
+                cand = lbl.first.locator("xpath=following::input[1]")
+                if cand.count() > 0:
+                    opener = cand
+                else:
+                    # tenta botão/combobox após o label
+                    cand2 = lbl.first.locator("xpath=following::*[@role='combobox' or self::button][1]")
+                    if cand2.count() > 0:
+                        opener = cand2
 
+        # 3) tentar qualquer combobox visível no topo
         if opener is None:
-            raise RuntimeError(f"Não encontrei combobox para '{label_text}'.")
+            combos = p.locator("*[role='combobox']")
+            if combos.count() > top_index:
+                opener = combos.nth(top_index)
 
-        opener.click()
-        p.wait_for_timeout(250)
+        # 4) fallback final: inputs visíveis no topo (y < 220)
+        if opener is None:
+            opener = p.locator("input:visible").filter(
+                has_not=p.locator("input[type='password']")
+            )
+            if opener.count() > 0:
+                # escolhe o N-ésimo input visível
+                idx = min(top_index, opener.count() - 1)
+                opener = opener.nth(idx)
+            else:
+                raise RuntimeError(f"Não encontrei campo para '{label}' (input/combobox).")
 
-        # 3) selecionar opção
-        # tenta clicar na opção se existir
-        opt = p.get_by_role("option", name=re.compile(re.escape(value), re.I))
+        # abrir/clicar e preencher
+        try:
+            opener.click()
+        except Exception:
+            # se não clicar, tenta foco via keyboard (raro)
+            p.keyboard.press("Tab")
+
+        p.wait_for_timeout(200)
+
+        # se for input, limpa e digita
+        try:
+            if opener.evaluate("el => el.tagName.toLowerCase()") == "input":
+                opener.fill("")
+                opener.type(value, delay=20)
+            else:
+                # se for combobox/button, digita direto no teclado
+                p.keyboard.type(value, delay=20)
+        except Exception:
+            p.keyboard.type(value, delay=20)
+
+        p.wait_for_timeout(300)
+
+        # tenta clicar numa opção pelo texto (se existir)
+        opt = p.get_by_text(re.compile(re.escape(value), re.I))
         if opt.count() > 0:
             opt.first.click()
-            p.wait_for_timeout(200)
-            return
-
-        # fallback: digita e enter
-        p.keyboard.type(value)
-        p.wait_for_timeout(200)
-        opt2 = p.get_by_role("option", name=re.compile(re.escape(value), re.I))
-        if opt2.count() > 0:
-            opt2.first.click()
         else:
             p.keyboard.press("Enter")
 
-        p.wait_for_timeout(250)
+        p.wait_for_timeout(300)
 
     # ---------------- Séries (rodapé) ----------------
 
@@ -552,10 +570,9 @@ class SmacExporter:
             else:
                 not_found.append(name)
 
-        if not_found:
-            if btn_select_all.count() > 0:
-                btn_select_all.first.click()
-            print(f"[AVISO] Séries não encontradas no DOM: {not_found}. Fallback: ALL.")
+        if not_found and btn_select_all.count() > 0:
+            btn_select_all.first.click()
+            print(f"[AVISO] Séries não encontradas: {not_found}. Fallback ALL.")
 
     # ---------------- Engrenagem e export ----------------
 
@@ -657,11 +674,7 @@ def main():
         st.markdown("<div class='mrs-card'>", unsafe_allow_html=True)
         st.subheader("1) Configurações do Relatório")
 
-        section = st.selectbox(
-            "Seção",
-            options=["Previsão", "Histórico"],
-            index=0
-        )
+        section = st.selectbox("Seção", options=["Previsão", "Histórico"], index=0)
 
         st.markdown("**Credenciais (SMAC/Climatempo)**")
         user = st.secrets.get("SMAC_USER", "mrs")
@@ -703,7 +716,6 @@ def main():
         st.divider()
 
         st.markdown("**Séries do Rodapé (Legenda)**")
-
         series_mode = st.radio(
             "Modo de séries",
             options=["Todas (ALL)", "Selecionar manualmente"],
