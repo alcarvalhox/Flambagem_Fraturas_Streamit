@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
-from io import BytesIOimport requests
+from io import BytesIO
+import requests
 from urllib.parse import quote
 from datetime import datetime, timedelta, date
 
