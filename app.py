@@ -3,20 +3,22 @@ import requests
 import pandas as pd
 from io import BytesIO
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, timedelta, date
 
 # =========================
-# CONFIGURAÇÃO
+# CONFIG
 # =========================
 BASE_URL = "http://apiadvisor.climatempo.com.br/api/v1"
 API_MANAGER = "http://apiadvisor.climatempo.com.br/api-manager"
 
-# Tokens (recomendado mover para st.secrets; deixei default para facilitar)
-DEFAULT_TOKEN_PREVISAO = "531a8163c4464184b1e8ff89742d531f"
-DEFAULT_TOKEN_HISTORICO = "8445618686be6cffc02c0954cbaada35"
+TOKEN_PREVISAO = "531a8163c4464184b1e8ff89742d531f"
+TOKEN_HISTORICO = "8445618686be6cffc02c0954cbaada35"
+
+st.set_page_config(page_title="Climatempo • Previsão & Histórico (Excel)", layout="wide")
+st.title("🌦️ Climatempo • Previsão & Histórico (Excel)")
 
 # =========================
-# FUNÇÕES UTILITÁRIAS HTTP
+# HTTP helpers
 # =========================
 def http_get(url: str, timeout: int = 30):
     try:
@@ -30,10 +32,6 @@ def http_get(url: str, timeout: int = 30):
         return False, None, -1, str(e)
 
 def http_put_form(url: str, data: dict, timeout: int = 30):
-    """
-    API Manager normalmente exige application/x-www-form-urlencoded
-    (data=...) e parâmetro localeId[].
-    """
     try:
         r = requests.put(url, data=data, timeout=timeout)
         if r.status_code >= 400:
@@ -45,111 +43,67 @@ def http_put_form(url: str, data: dict, timeout: int = 30):
         return False, None, -1, str(e)
 
 # =========================
-# FUNÇÕES DE NEGÓCIO
+# API functions
 # =========================
 @st.cache_data(ttl=3600, show_spinner=False)
-def buscar_cidades(nome: str, uf: str, token: str):
-    # /locale/city?name=...&state=...&token=...
-    url = f"{BASE_URL}/locale/city?name={quote(nome)}&state={uf}&token={token}"
+def buscar_cidades(nome: str, uf: str):
+    # Busca por nome + UF
+    url = f"{BASE_URL}/locale/city?name={quote(nome)}&state={uf}&token={TOKEN_PREVISAO}"
     ok, payload, status, err = http_get(url)
     if not ok:
         raise RuntimeError(f"Erro ao buscar cidade. HTTP {status}: {err}")
     return payload or []
 
-def registrar_locale(token: str, locale_id: int):
-    """
-    Vincula locale ao token (necessário em alguns planos).
-    PUT /api-manager/user-token/<TOKEN>/locales com localeId[].
-    """
+def registrar_locale_no_token(token: str, locale_id: int):
+    # Alguns planos exigem registrar locale no token.
     url = f"{API_MANAGER}/user-token/{token}/locales"
     data = {"localeId[]": str(locale_id)}
     return http_put_form(url, data=data)
 
-def fetch_previsao(token: str, locale_id: int, dias_desejados: int):
+def fetch_previsao(locale_id: int, dias_desejados: int):
     """
-    A API expõe endpoints fixos de previsão (ex.: 15 dias e 270 dias).
-    Então NÃO chamamos /days/60. Em vez disso:
-      - se dias <= 15 => /days/15 e recorta
-      - se dias > 15  => tenta /days/270 e recorta
-      - se /days/270 não estiver disponível no plano, cai para /days/15
-    (Essas rotas constam na doc pública.) [1](https://apiadvisor.climatempo.com.br/doc/index.html)
+    Previsão: endpoints fixos (15 ou 270). Nunca chamamos days/60.
+    - se dias <=15 => days/15
+    - se dias >15 => tenta days/270; se falhar, cai para days/15
+    (Estrutura e uso do token via query param são descritos na doc pública.) [1](https://apiadvisor.climatempo.com.br/doc/index.html)
     """
     if dias_desejados <= 15:
-        url = f"{BASE_URL}/forecast/locale/{locale_id}/days/15?token={token}"
+        url = f"{BASE_URL}/forecast/locale/{locale_id}/days/15?token={TOKEN_PREVISAO}"
         ok, payload, status, err = http_get(url)
         return ok, payload, status, err, 15
 
-    url270 = f"{BASE_URL}/forecast/locale/{locale_id}/days/270?token={token}"
+    url270 = f"{BASE_URL}/forecast/locale/{locale_id}/days/270?token={TOKEN_PREVISAO}"
     ok, payload, status, err = http_get(url270)
     if ok:
         return True, payload, status, err, 270
 
     # fallback
-    url15 = f"{BASE_URL}/forecast/locale/{locale_id}/days/15?token={token}"
+    url15 = f"{BASE_URL}/forecast/locale/{locale_id}/days/15?token={TOKEN_PREVISAO}"
     ok2, payload2, status2, err2 = http_get(url15)
     return ok2, payload2, status2, (err or err2), 15
 
-def fetch_historico_auto(token: str, locale_id: int, dias: int, template_path: str, extra_candidates: list):
+def fetch_historico_geo_hourly(lat: float, lon: float, from_date: date):
     """
-    Histórico: como o endpoint pode variar por contrato, tentamos:
-    1) template configurado no sidebar
-    2) lista de candidates comuns
-    Retorna (ok, payload, status, err, endpoint_usado)
+    Histórico GEO / HOURLY:
+    /history/geo/hourly?token=...&from=YYYY-MM-DD&latitude=...&longitude=...
+    (endpoint fornecido pelo usuário)
     """
-    tried = []
+    from_str = from_date.strftime("%Y-%m-%d")
+    url = (
+        f"{BASE_URL}/history/geo/hourly"
+        f"?token={TOKEN_HISTORICO}"
+        f"&from={from_str}"
+        f"&latitude={lat}"
+        f"&longitude={lon}"
+    )
+    return http_get(url)
 
-    def make_url(path: str):
-        # path deve começar com "/"
-        if "?" in path:
-            return f"{BASE_URL}{path}&token={token}"
-        return f"{BASE_URL}{path}?token={token}"
-
-    # 1) tenta template
-    path = template_path.format(id=locale_id, n=dias)
-    url = make_url(path)
-    ok, payload, status, err = http_get(url)
-    tried.append((url, status))
-    if ok:
-        return True, payload, status, err, path, tried
-
-    # 2) tenta candidates
-    for cand in extra_candidates:
-        path2 = cand.format(id=locale_id, n=dias)
-        url2 = make_url(path2)
-        ok2, payload2, status2, err2 = http_get(url2)
-        tried.append((url2, status2))
-        if ok2:
-            return True, payload2, status2, err2, path2, tried
-
-    return False, None, status, err, None, tried
-
-def normalizar_payload_para_df(payload, dias_desejados: int):
-    """
-    Normaliza retornos no formato:
-    - dict com chave "data": lista
-    - lista direta
-    - dict genérico (json_normalize)
-    """
-    if payload is None:
-        return pd.DataFrame()
-
-    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
-        data_list = payload.get("data", [])[:dias_desejados]
-        return flatten_lista_data(data_list)
-
-    if isinstance(payload, list):
-        return flatten_lista_data(payload[:dias_desejados])
-
-    # fallback genérico
-    df = pd.json_normalize(payload)
-    return df
-
-def flatten_lista_data(data_list):
-    """
-    Extrai variáveis meteorológicas típicas (quando existirem) para um formato tabular.
-    Funciona bem para forecast (documentado) e para histórico caso a estrutura seja parecida.
-    """
+# =========================
+# Data normalization
+# =========================
+def flatten_forecast(payload: dict, dias: int) -> pd.DataFrame:
     rows = []
+    data_list = (payload or {}).get("data", [])[:dias]
     for d in data_list:
         rain = d.get("rain", {}) or {}
         temp = d.get("temperature", {}) or {}
@@ -158,7 +112,6 @@ def flatten_lista_data(data_list):
         wind = d.get("wind", {}) or {}
         uv = d.get("uv", {}) or {}
         sun = d.get("sun", {}) or {}
-        clouds = d.get("cloud_coverage", {}) or {}
 
         txt = (d.get("text_icon", {}) or {}).get("text", {}) or {}
         phrase = (txt.get("phrase", {}) or {}).get("reduced")
@@ -178,12 +131,34 @@ def flatten_lista_data(data_list):
             "uv_max": uv.get("max"),
             "sunrise": sun.get("sunrise"),
             "sunset": sun.get("sunset"),
-            "cloud_low_pct": clouds.get("low"),
-            "cloud_mid_pct": clouds.get("mid"),
-            "cloud_high_pct": clouds.get("high"),
             "summary_pt": phrase
         })
     return pd.DataFrame(rows)
+
+def flatten_history(payload) -> pd.DataFrame:
+    """
+    Histórico hourly pode vir como dict com listas internas OU lista direta.
+    Como não temos schema público fácil, normalizamos genericamente com json_normalize.
+    """
+    if payload is None:
+        return pd.DataFrame()
+
+    # Caso típico: dict com alguma chave de lista (ex.: "data", "hourly", etc.)
+    if isinstance(payload, dict):
+        # tenta chaves prováveis
+        for key in ["data", "hourly", "hours", "history"]:
+            if key in payload and isinstance(payload[key], list):
+                df = pd.json_normalize(payload[key])
+                return df
+        # fallback: normaliza o dict inteiro
+        return pd.json_normalize(payload)
+
+    # Caso: lista
+    if isinstance(payload, list):
+        return pd.json_normalize(payload)
+
+    # fallback
+    return pd.DataFrame({"raw": [str(payload)]})
 
 def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str):
     output = BytesIO()
@@ -192,29 +167,8 @@ def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str):
     return output.getvalue()
 
 # =========================
-# UI
+# UI - City selection
 # =========================
-st.set_page_config(page_title="Climatempo • Previsão & Histórico (Excel)", layout="wide")
-st.title("🌦️ Climatempo • Previsão & Histórico (Excel)")
-
-with st.sidebar:
-    st.header("🔐 Tokens / Ajustes")
-    token_prev = st.text_input("Token Previsão", value=st.secrets.get("TOKEN_PREVISAO", DEFAULT_TOKEN_PREVISAO), type="password")
-    token_hist = st.text_input("Token Histórico", value=st.secrets.get("TOKEN_HISTORICO", DEFAULT_TOKEN_HISTORICO), type="password")
-
-    st.divider()
-    st.subheader("🕒 Histórico — endpoint")
-    st.caption("Como o endpoint pode variar por contrato, ajuste o template se necessário.")
-    history_template = st.text_input(
-        "Template do histórico (path)",
-        value=st.secrets.get("HISTORY_TEMPLATE", "/history/locale/{id}/days/{n}"),
-        help="Ex.: /history/locale/{id}/days/{n}"
-    )
-
-    st.divider()
-    show_debug = st.checkbox("Mostrar detalhes de erro (debug)", value=False)
-
-# Sessão
 st.session_state.setdefault("cidades", [])
 st.session_state.setdefault("ultima_busca", [])
 
@@ -231,7 +185,7 @@ with c4:
 
 if buscar_btn:
     try:
-        resultados = buscar_cidades(nome_cidade.strip(), uf.strip().upper(), token_prev)
+        resultados = buscar_cidades(nome_cidade.strip(), uf.strip().upper())
         st.session_state["ultima_busca"] = resultados
         if resultados:
             st.success(f"{len(resultados)} resultado(s) encontrado(s). Selecione e adicione.")
@@ -249,7 +203,14 @@ if st.session_state["ultima_busca"]:
 if add_btn and cidade_sel:
     ja = any(x["id"] == cidade_sel["id"] for x in st.session_state["cidades"])
     if not ja:
-        st.session_state["cidades"].append({"id": cidade_sel["id"], "name": cidade_sel.get("name"), "state": cidade_sel.get("state")})
+        st.session_state["cidades"].append({
+            "id": cidade_sel.get("id"),
+            "name": cidade_sel.get("name"),
+            "state": cidade_sel.get("state"),
+            # latitude/longitude podem ou não vir no payload. Guardamos se existirem.
+            "latitude": cidade_sel.get("latitude") or cidade_sel.get("lat"),
+            "longitude": cidade_sel.get("longitude") or cidade_sel.get("lon"),
+        })
         st.success("Cidade adicionada.")
     else:
         st.info("Cidade já está na lista.")
@@ -257,92 +218,64 @@ if add_btn and cidade_sel:
 if st.session_state["cidades"]:
     st.write("**Cidades na lista:**")
     st.dataframe(pd.DataFrame(st.session_state["cidades"]), use_container_width=True)
-
-    r1, r2 = st.columns([2, 1.2])
-    with r1:
-        remover_id = st.selectbox("Remover cidade (ID)", options=[c["id"] for c in st.session_state["cidades"]])
-    with r2:
-        if st.button("🗑️ Remover selecionada", use_container_width=True):
-            st.session_state["cidades"] = [c for c in st.session_state["cidades"] if c["id"] != remover_id]
-            st.success("Removida.")
 else:
     st.info("Adicione uma ou mais cidades para gerar relatórios.")
 
 st.divider()
-tab_prev, tab_hist = st.tabs(["🔮 Previsão", "🕒 Histórico"])
+tab_prev, tab_hist = st.tabs(["🔮 Previsão", "🕒 Histórico (GEO / Hourly)"])
 
 # =========================
-# ABA PREVISÃO
+# TAB: Forecast
 # =========================
 with tab_prev:
     st.subheader("🔮 Previsão (até 60 dias ou limite do seu plano)")
     dias_prev = st.slider("Período de previsão (dias)", 1, 60, 15)
 
-    b1, b2 = st.columns([1.3, 1.3])
+    b1, b2 = st.columns([1.4, 1.4])
     gerar_prev = b1.button("⚙️ Gerar Previsão", use_container_width=True)
     vincular_prev = b2.button("🔗 Vincular cidades ao token (previsão)", use_container_width=True)
 
-    st.caption(
-        "Se aparecer erro de acesso (Access forbidden), é necessário registrar a cidade no token via API Manager. "
-        "O app permite fazer isso com o botão acima. [2](https://www.tempo.com/)[3](https://github.com/adinan-cenci/climatempo-api)"
-    )
-
-    if vincular_prev:
-        if not st.session_state["cidades"]:
-            st.warning("Adicione pelo menos uma cidade.")
-        else:
-            for c in st.session_state["cidades"]:
-                ok, payload, status, err = registrar_locale(token_prev, c["id"])
-                if ok:
-                    st.success(f"Vinculada ao token de previsão: {c['name']}-{c['state']} (ID {c['id']})")
-                else:
-                    st.error(f"Falha ao vincular (previsão) {c['name']} (ID {c['id']}). HTTP {status}")
-                    if show_debug:
-                        st.code(err)
+    if vincular_prev and st.session_state["cidades"]:
+        for c in st.session_state["cidades"]:
+            ok, _, status, err = registrar_locale_no_token(TOKEN_PREVISAO, c["id"])
+            if ok:
+                st.success(f"Vinculada ao token de previsão: {c['name']}-{c['state']} (ID {c['id']})")
+            else:
+                st.error(f"Falha ao vincular (previsão) {c['name']} (ID {c['id']}). HTTP {status}")
+                st.code(err)
 
     if gerar_prev:
         if not st.session_state["cidades"]:
             st.warning("Adicione pelo menos uma cidade.")
         else:
             all_dfs = []
-            avisos = []
             with st.spinner("Consultando previsões..."):
                 for c in st.session_state["cidades"]:
-                    ok, payload, status, err, endpoint_dias = fetch_previsao(token_prev, c["id"], dias_prev)
+                    ok, payload, status, err, endpoint_dias = fetch_previsao(c["id"], dias_prev)
 
-                    # Se falhar por acesso, tenta registrar e repetir 1x
+                    # se falhar por acesso, tenta registrar e repetir 1x
                     if not ok and ("Access forbidden" in (err or "") or status in (400, 403)):
-                        reg_ok, _, reg_status, reg_err = registrar_locale(token_prev, c["id"])
+                        reg_ok, _, reg_status, reg_err = registrar_locale_no_token(TOKEN_PREVISAO, c["id"])
                         if reg_ok:
-                            ok, payload, status, err, endpoint_dias = fetch_previsao(token_prev, c["id"], dias_prev)
+                            ok, payload, status, err, endpoint_dias = fetch_previsao(c["id"], dias_prev)
                         else:
-                            st.error(f"Não foi possível registrar {c['name']} no token de previsão. HTTP {reg_status}")
-                            if show_debug:
-                                st.code(reg_err)
+                            st.error(f"Não foi possível registrar {c['name']} no token. HTTP {reg_status}")
+                            st.code(reg_err)
 
                     if not ok:
                         st.error(f"Erro na previsão de {c['name']}-{c['state']} (ID {c['id']}). HTTP {status}")
-                        if show_debug:
-                            st.code(err)
+                        st.code(err)
                         continue
 
-                    total = len((payload or {}).get("data", []))
-                    if total < dias_prev:
-                        avisos.append(f"{c['name']}-{c['state']}: solicitado {dias_prev}, retornado {total} (endpoint /days/{endpoint_dias}).")
-
-                    df = normalizar_payload_para_df(payload, dias_prev)
+                    df = flatten_forecast(payload, dias_prev)
                     df.insert(0, "city", f"{c['name']}-{c['state']}")
                     df.insert(1, "locale_id", c["id"])
+                    df.insert(2, "endpoint_days_used", endpoint_dias)
                     all_dfs.append(df)
 
             if all_dfs:
                 df_final = pd.concat(all_dfs, ignore_index=True)
                 st.dataframe(df_final, use_container_width=True)
-
-                if avisos:
-                    st.warning("Algumas cidades retornaram menos dias do que o solicitado:")
-                    for a in avisos:
-                        st.write("- " + a)
 
                 xlsx = df_to_xlsx_bytes(df_final, "Previsao")
                 ts = datetime.now().strftime("%Y%m%d_%H%M")
@@ -357,93 +290,91 @@ with tab_prev:
                 st.info("Nenhuma previsão gerada.")
 
 # =========================
-# ABA HISTÓRICO
+# TAB: History GEO / Hourly
 # =========================
 with tab_hist:
-    st.subheader("🕒 Histórico (até 60 dias ou limite do seu plano)")
-    dias_hist = st.slider("Período de histórico (dias)", 1, 60, 15)
+    st.subheader("🕒 Histórico (GEO / Hourly) — até 60 dias (loop diário)")
 
-    cA, cB = st.columns([1.3, 1.3])
-    gerar_hist = cA.button("⚙️ Gerar Histórico", use_container_width=True)
-    vincular_hist = cB.button("🔗 Vincular cidades ao token (histórico)", use_container_width=True)
+    colA, colB = st.columns([1.1, 1.1])
+    with colA:
+        dias_hist = st.slider("Quantidade de dias de histórico", 1, 60, 7)
+    with colB:
+        data_final = st.date_input("Data final (inclusive)", value=date.today())
 
     st.caption(
-        "Assim como na previsão, o histórico pode exigir que o locale esteja registrado no token. "
-        "O registro é via API Manager com localeId[]. [2](https://www.tempo.com/)[3](https://github.com/adinan-cenci/climatempo-api)"
+        "O endpoint de histórico do seu contrato é por latitude/longitude e data 'from'. "
+        "O app consulta dia a dia e consolida em um único Excel."
     )
 
-    # candidates comuns (caso o template padrão não funcione)
-    history_candidates = [
-        "/historico/locale/{id}/days/{n}",
-        "/historical/locale/{id}/days/{n}",
-        "/history/locale/{id}/day/{n}",
-        "/history/locale/{id}/days/{n}",  # repetido para segurança
-    ]
-
-    if vincular_hist:
-        if not st.session_state["cidades"]:
-            st.warning("Adicione pelo menos uma cidade.")
-        else:
-            for c in st.session_state["cidades"]:
-                ok, payload, status, err = registrar_locale(token_hist, c["id"])
-                if ok:
-                    st.success(f"Vinculada ao token de histórico: {c['name']}-{c['state']} (ID {c['id']})")
-                else:
-                    st.error(f"Falha ao vincular (histórico) {c['name']} (ID {c['id']}). HTTP {status}")
-                    if show_debug:
-                        st.code(err)
+    gerar_hist = st.button("⚙️ Gerar Histórico (GEO/Hourly)", use_container_width=True)
 
     if gerar_hist:
         if not st.session_state["cidades"]:
             st.warning("Adicione pelo menos uma cidade.")
-        else:
-            all_dfs = []
-            with st.spinner("Consultando histórico..."):
-                for c in st.session_state["cidades"]:
-                    ok, payload, status, err, endpoint_used, tried = fetch_historico_auto(
-                        token_hist, c["id"], dias_hist, history_template, history_candidates
-                    )
+            st.stop()
 
-                    # Se falhar por acesso, tenta registrar e repetir 1x com o template
-                    if not ok and ("Access forbidden" in (err or "") or status in (400, 403)):
-                        reg_ok, _, reg_status, reg_err = registrar_locale(token_hist, c["id"])
-                        if reg_ok:
-                            ok, payload, status, err, endpoint_used, tried = fetch_historico_auto(
-                                token_hist, c["id"], dias_hist, history_template, history_candidates
-                            )
-                        else:
-                            st.error(f"Não foi possível registrar {c['name']} no token de histórico. HTTP {reg_status}")
-                            if show_debug:
-                                st.code(reg_err)
+        all_hist = []
+        progress = st.progress(0)
+        total_steps = len(st.session_state["cidades"]) * dias_hist
+        step = 0
+
+        with st.spinner("Consultando histórico horário..."):
+            for c in st.session_state["cidades"]:
+                # Latitude/longitude: se não vierem do locale/city, pedir manualmente
+                lat = c.get("latitude")
+                lon = c.get("longitude")
+
+                if lat is None or lon is None:
+                    st.warning(
+                        f"Latitude/Longitude não disponíveis para {c['name']}-{c['state']} (ID {c['id']}). "
+                        "Informe manualmente abaixo."
+                    )
+                    lat = st.number_input(f"Latitude para {c['name']}-{c['state']}", value=-20.0, format="%.6f", key=f"lat_{c['id']}")
+                    lon = st.number_input(f"Longitude para {c['name']}-{c['state']}", value=-44.0, format="%.6f", key=f"lon_{c['id']}")
+                    # salva na sessão
+                    c["latitude"], c["longitude"] = float(lat), float(lon)
+
+                lat, lon = float(lat), float(lon)
+
+                # intervalo de datas
+                start_date = data_final - timedelta(days=dias_hist - 1)
+
+                for i in range(dias_hist):
+                    dia = start_date + timedelta(days=i)
+
+                    ok, payload, status, err = fetch_historico_geo_hourly(lat, lon, dia)
+
+                    step += 1
+                    progress.progress(min(step / total_steps, 1.0))
 
                     if not ok:
-                        st.error(f"Erro no histórico de {c['name']}-{c['state']} (ID {c['id']}). HTTP {status}")
-                        if show_debug:
-                            st.code(err)
-                            st.write("Tentativas (URL, status):")
-                            for u, s in tried:
-                                st.write(f"- {u}  →  {s}")
+                        st.error(f"Erro no histórico {c['name']}-{c['state']} em {dia} (HTTP {status})")
+                        st.code(err)
                         continue
 
-                    df = normalizar_payload_para_df(payload, dias_hist)
-                    df.insert(0, "city", f"{c['name']}-{c['state']}")
-                    df.insert(1, "locale_id", c["id"])
-                    df.insert(2, "endpoint_used", endpoint_used or "")
-                    all_dfs.append(df)
+                    dfh = flatten_history(payload)
 
-            if all_dfs:
-                df_final = pd.concat(all_dfs, ignore_index=True)
-                st.dataframe(df_final, use_container_width=True)
+                    # adiciona metadados para consolidar
+                    dfh.insert(0, "city", f"{c['name']}-{c['state']}")
+                    dfh.insert(1, "locale_id", c["id"])
+                    dfh.insert(2, "latitude", lat)
+                    dfh.insert(3, "longitude", lon)
+                    dfh.insert(4, "from_date", dia.strftime("%Y-%m-%d"))
 
-                xlsx = df_to_xlsx_bytes(df_final, "Historico")
-                ts = datetime.now().strftime("%Y%m%d_%H%M")
-                st.download_button(
-                    "⬇️ Download Histórico (XLSX)",
-                    data=xlsx,
-                    file_name=f"historico_{ts}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-            else:
-                st.info("Nenhum histórico gerado. Ative o debug e ajuste o template do histórico no menu lateral.")
+                    all_hist.append(dfh)
 
+        if all_hist:
+            df_hist_final = pd.concat(all_hist, ignore_index=True)
+            st.dataframe(df_hist_final, use_container_width=True)
+
+            xlsx = df_to_xlsx_bytes(df_hist_final, "Historico_Hourly")
+            ts = datetime.now().strftime("%Y%m%d_%H%M")
+            st.download_button(
+                "⬇️ Download Histórico (XLSX)",
+                data=xlsx,
+                file_name=f"historico_geo_hourly_{ts}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        else:
+            st.warning("Nenhum histórico foi retornado. Verifique datas/lat/lon.")
