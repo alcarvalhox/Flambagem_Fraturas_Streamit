@@ -446,4 +446,4 @@ with tab_hist:
                 )
             else:
                 st.info("Nenhum histórico gerado. Ative o debug e ajuste o template do histórico no menu lateral.")
-``
+
