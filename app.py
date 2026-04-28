@@ -296,3 +296,84 @@ with tab_prev:
                 for c in st.session_state["cidades"]:
                     ok, payload, status, err, endpoint_dias = fetch_previsao(c["id"], dias_prev, token_prev)
                     if not ok:
+                        st.error(f"Erro na previsão de {c['name']}-{c['state']} (ID {c['id']}). HTTP {status}")
+                        if st.session_state["show_debug"]:
+                            st.code(err)
+                        continue
+
+                    total_retornado = len((payload or {}).get("data", []))
+                    if total_retornado < dias_prev:
+                        avisos.append(f"{c['name']}-{c['state']}: solicitado {dias_prev}, retornado {total_retornado} (endpoint /days/{endpoint_dias}).")
+
+                    df = normalizar_para_df(payload, dias_prev)
+                    df.insert(0, "city", f"{c['name']}-{c['state']}")
+                    df.insert(1, "locale_id", c["id"])
+                    all_rows.append(df)
+
+            if all_rows:
+                df_prev_final = pd.concat(all_rows, ignore_index=True)
+                st.dataframe(df_prev_final, use_container_width=True)
+
+                if avisos:
+                    st.warning("Algumas cidades retornaram menos dias do que o solicitado:")
+                    for a in avisos:
+                        st.write("- " + a)
+
+                xlsx = df_to_xlsx_bytes(df_prev_final, sheet_name="Previsao")
+                ts = datetime.now().strftime("%Y%m%d_%H%M")
+                st.download_button(
+                    "⬇️ Download Previsão (XLSX)",
+                    data=xlsx,
+                    file_name=f"previsao_{ts}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            else:
+                st.info("Nenhuma previsão gerada (todas falharam). Veja mensagens acima.")
+
+# =========================
+# ABA HISTÓRICO
+# =========================
+with tab_hist:
+    st.subheader("🕒 Histórico (até 60 dias ou limite do seu plano)")
+
+    dias_hist = st.slider("Período de histórico (dias)", 1, 60, 15)
+
+    gerar_hist = st.button("⚙️ Gerar Histórico", use_container_width=True)
+
+    st.caption("Se der erro, altere o template do endpoint no menu lateral e veja o debug.")
+
+    if gerar_hist:
+        if not st.session_state["cidades"]:
+            st.warning("Adicione pelo menos uma cidade na lista.")
+        else:
+            all_rows = []
+            with st.spinner("Consultando histórico..."):
+                for c in st.session_state["cidades"]:
+                    ok, payload, status, err = fetch_historico(c["id"], dias_hist, token_hist, history_template)
+                    if not ok:
+                        st.error(f"Erro no histórico de {c['name']}-{c['state']} (ID {c['id']}). HTTP {status}")
+                        if st.session_state["show_debug"]:
+                            st.code(err)
+                        continue
+
+                    df = normalizar_para_df(payload, dias_hist)
+                    df.insert(0, "city", f"{c['name']}-{c['state']}")
+                    df.insert(1, "locale_id", c["id"])
+                    all_rows.append(df)
+
+            if all_rows:
+                df_hist_final = pd.concat(all_rows, ignore_index=True)
+                st.dataframe(df_hist_final, use_container_width=True)
+
+                xlsx = df_to_xlsx_bytes(df_hist_final, sheet_name="Historico")
+                ts = datetime.now().strftime("%Y%m%d_%H%M")
+                st.download_button(
+                    "⬇️ Download Histórico (XLSX)",
+                    data=xlsx,
+                    file_name=f"historico_{ts}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            else:
+                st.info("Nenhum histórico gerado (todas falharam). Veja mensagens acima.")
