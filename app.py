@@ -97,4 +97,4 @@ if st.button("🔮 Gerar Previsão"):
     except Exception as e:
         st.error("Erro ao gerar previsão")
         st.exception(e)
-``
+
