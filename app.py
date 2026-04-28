@@ -1,7 +1,7 @@
-import pandas as pd
 import streamlit as st
-from io import BytesIO
 import requests
+import pandas as pd
+from io import BytesIO
 from urllib.parse import quote
 from datetime import datetime, timedelta, date
 
@@ -17,7 +17,7 @@ TOKEN_HIST_DEFAULT = "8445618686be6cffc02c0954cbaada35"
 
 MAX_DIAS = 60
 
-st.set_page_config(page_title="Climatempo • Opção A (60d) + Histórico GEO", layout="wide")
+st.set_page_config(page_title="Climatempo • Previsão (60d) & Histórico GEO", layout="wide")
 st.title("🌦️ Climatempo • Previsão (até 60 dias) & Histórico GEO (Hourly + Diário)")
 
 # =========================
@@ -25,11 +25,18 @@ st.title("🌦️ Climatempo • Previsão (até 60 dias) & Histórico GEO (Hour
 # =========================
 with st.sidebar:
     st.header("🔐 Tokens")
-    TOKEN_PREVISAO = st.text_input("Token Previsão", value=st.secrets.get("TOKEN_PREVISAO", TOKEN_PREVISAO_DEFAULT), type="password")
-    TOKEN_HIST = st.text_input("Token Histórico", value=st.secrets.get("TOKEN_HISTORICO", TOKEN_HIST_DEFAULT), type="password")
+    TOKEN_PREVISAO = st.text_input(
+        "Token Previsão",
+        value=st.secrets.get("TOKEN_PREVISAO", TOKEN_PREVISAO_DEFAULT),
+        type="password",
+    )
+    TOKEN_HIST = st.text_input(
+        "Token Histórico",
+        value=st.secrets.get("TOKEN_HISTORICO", TOKEN_HIST_DEFAULT),
+        type="password",
+    )
     st.divider()
     DEBUG = st.checkbox("Modo debug", value=False)
-    st.caption("Dica: se o histórico der 'Latitude and Longitude not allowed', substitua lat/lon por coordenadas autorizadas do seu projeto.")
 
 # =========================
 # HTTP helpers
@@ -53,7 +60,7 @@ def http_put_form(url: str, data: dict, timeout: int = 30):
         return False, None, -1, str(e)
 
 # =========================
-# GEO CODING (conversão automática cidade -> lat/lon)
+# GEO coding (cidade -> lat/lon sugeridos)
 # =========================
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_city(city: str, uf: str):
@@ -67,7 +74,7 @@ def geocode_city(city: str, uf: str):
     return float(data[0]["lat"]), float(data[0]["lon"])
 
 # =========================
-# LOCALE lookup (para previsão por cidade)
+# Locale lookup + register (previsão)
 # =========================
 def buscar_cidades(city: str, uf: str):
     url = f"{BASE_V1}/locale/city?name={quote(city)}&state={uf}&token={TOKEN_PREVISAO}"
@@ -77,25 +84,18 @@ def buscar_cidades(city: str, uf: str):
     return payload or []
 
 def registrar_locale_no_token(locale_id: int):
-    """
-    Alguns planos exigem registrar o locale no token (senão dá 'Access forbidden').
-    Endpoint via API Manager é usado amplamente para isso. [1](https://github.com/ficosta/Climatempo_API/blob/master/climatempo_api/climatempo.py)[2](https://br.meteored.com/)
-    """
+    # Recurso comum quando aparece "Access forbidden"
     url = f"{API_MANAGER}/user-token/{TOKEN_PREVISAO}/locales"
     data = {"localeId[]": str(locale_id)}
     return http_put_form(url, data=data)
 
 # =========================
-# PREVISÃO (até 60 dias via locale)
+# Forecast (até 60 dias por locale)
 # =========================
 def fetch_forecast(locale_id: int, dias: int):
-    """
-    A doc pública descreve forecast por cidade com rotas fixas como /days/15,
-    e em alguns planos /days/270 também existe; não usamos /days/60. [3](https://br-prod.asyncgw.teams.microsoft.com/v1/objects/0-eus-d17-2bad2c4a4bc07a96e8ae80053f565549/views/original)
-    """
     dias = max(1, min(MAX_DIAS, int(dias)))
 
-    # tenta 270 (para permitir recorte até 60)
+    # tenta 270 -> recorta 60
     url270 = f"{BASE_V1}/forecast/locale/{locale_id}/days/270?token={TOKEN_PREVISAO}"
     ok, payload, status, err = http_get(url270)
     if ok and isinstance(payload, dict) and "data" in payload:
@@ -110,10 +110,6 @@ def fetch_forecast(locale_id: int, dias: int):
     return False, None, (status2 if not ok else status), (err2 if not ok2 else err), None
 
 def forecast_to_df(days_list: list, point_label: str, locale_id: int):
-    """
-    Correção do KeyError 'probability':
-    usa .get() porque alguns dias podem não trazer rain.probability.
-    """
     rows = []
     for d in days_list:
         rain = d.get("rain", {}) or {}
@@ -129,7 +125,7 @@ def forecast_to_df(days_list: list, point_label: str, locale_id: int):
             "Temp Min (°C)": temp.get("min"),
             "Temp Max (°C)": temp.get("max"),
             "Chuva (mm)": rain.get("precipitation"),
-            "Prob Chuva (%)": rain.get("probability"),  # pode ser None, e tudo bem
+            "Prob Chuva (%)": rain.get("probability"),  # pode não existir -> None (sem quebrar)
             "Umidade Min (%)": hum.get("min"),
             "Umidade Max (%)": hum.get("max"),
             "Vento Médio (km/h)": wind.get("velocity_avg") or wind.get("speed"),
@@ -139,7 +135,7 @@ def forecast_to_df(days_list: list, point_label: str, locale_id: int):
     return pd.DataFrame(rows)
 
 # =========================
-# HISTÓRICO GEO/HOURLY (Opção 2: hourly + resumo diário)
+# History GEO/hourly + resumo diário
 # =========================
 def history_geo_hourly(lat: float, lon: float, from_date: date):
     from_str = from_date.strftime("%Y-%m-%d")
@@ -153,11 +149,6 @@ def history_geo_hourly(lat: float, lon: float, from_date: date):
     return http_get(url)
 
 def normalize_history_payload(payload):
-    """
-    Normaliza resposta para DataFrame.
-    - se payload['data'] for lista, usa ela
-    - senão, normaliza o payload todo
-    """
     if payload is None:
         return pd.DataFrame()
     if isinstance(payload, dict) and isinstance(payload.get("data"), list):
@@ -173,36 +164,21 @@ def pick_first_col(df: pd.DataFrame, candidates: list):
     return None
 
 def build_daily_summary(df_hourly: pd.DataFrame):
-    """
-    Cria resumo diário com robustez:
-    - tenta descobrir coluna de data/hora
-    - tenta descobrir coluna de precipitação
-    - tenta descobrir temperatura e umidade
-    """
     if df_hourly.empty:
         return df_hourly
 
-    # detecta coluna de timestamp
     time_col = pick_first_col(df_hourly, ["date", "datetime", "time", "timestamp"])
     if time_col is None:
-        # sem timestamp, não dá para agregar por dia
-        out = pd.DataFrame({"warning": ["Sem coluna de tempo detectável para agregação diária."]})
-        return out
+        return pd.DataFrame({"warning": ["Sem coluna de tempo detectável para agregação diária."]})
 
-    # converte para datetime e extrai dia
     dt = pd.to_datetime(df_hourly[time_col], errors="coerce")
     df_hourly = df_hourly.assign(_day=dt.dt.date)
 
-    # precipitação (mm)
     rain_col = pick_first_col(df_hourly, ["rain.precipitation", "precipitation", "rain", "mm"])
-    # temperatura
     t_col = pick_first_col(df_hourly, ["temperature", "temp", "temperature.value", "temperatureC"])
-    # umidade
     h_col = pick_first_col(df_hourly, ["humidity", "humidity.value", "rh"])
 
-    agg = {"_day": "first"}
-
-    # monta agregações com fallback
+    agg = {}
     if rain_col:
         agg[rain_col] = "sum"
     if t_col:
@@ -211,12 +187,9 @@ def build_daily_summary(df_hourly: pd.DataFrame):
         agg[h_col] = "mean"
 
     g = df_hourly.groupby("_day").agg(agg)
-
-    # “achata” colunas multiindex
     g.columns = ["_".join([str(x) for x in col if x]) if isinstance(col, tuple) else str(col) for col in g.columns]
-    g = g.reset_index(drop=True)
+    g = g.reset_index()
 
-    # renomeia para padrão amigável
     rename = {}
     if rain_col:
         rename[f"{rain_col}_sum"] = "chuva_total_mm"
@@ -226,13 +199,12 @@ def build_daily_summary(df_hourly: pd.DataFrame):
     if h_col:
         rename[f"{h_col}_mean"] = "umidade_media"
 
-    g = g.rename(columns=rename)
-    # recoloca a data diária
-    g.insert(0, "dia", df_hourly.groupby("_day").size().index.astype(str))
+    g = g.rename(columns=rename).rename(columns={"_day": "dia"})
+    g["dia"] = g["dia"].astype(str)
     return g
 
 # =========================
-# XLSX export
+# XLSX
 # =========================
 def to_xlsx(sheets: dict):
     buf = BytesIO()
@@ -242,36 +214,33 @@ def to_xlsx(sheets: dict):
     return buf.getvalue()
 
 # =========================
-# STATE: multipontos
+# STATE
 # =========================
-st.session_state.setdefault("points", [])  # lista de dicts
+st.session_state.setdefault("points", [])
+st.session_state.setdefault("search_results", [])
 
 # =========================
-# UI: adicionar pontos
+# UI: Adicionar ponto
 # =========================
-with st.expander("📍 Pontos (Cidade → locale_id + lat/lon)", expanded=True):
+with st.expander("📍 Pontos (Cidade → locale_id + lat/lon sugeridos)", expanded=True):
     col1, col2, col3 = st.columns([3, 1, 1])
     city_in = col1.text_input("Cidade", "Juiz de Fora")
     uf_in = col2.text_input("UF", "MG")
-    buscar = col3.button("🔎 Buscar / Selecionar")
+    buscar = col3.button("Buscar / Selecionar")
 
-    selected = None
     if buscar:
         try:
-            results = buscar_cidades(city_in.strip(), uf_in.strip().upper())
-            st.session_state["search_results"] = results
+            st.session_state.search_results = buscar_cidades(city_in.strip(), uf_in.strip().upper())
         except Exception as e:
             st.error(str(e))
-            st.session_state["search_results"] = []
+            st.session_state.search_results = []
 
-    results = st.session_state.get("search_results", [])
-    if results:
-        opts = {f"{c.get('name')} - {c.get('state')} (ID {c.get('id')})": c for c in results}
+    if st.session_state.search_results:
+        opts = {f"{c.get('name')} - {c.get('state')} (ID {c.get('id')})": c for c in st.session_state.search_results}
         key = st.selectbox("Resultados", list(opts.keys()))
         selected = opts[key]
 
-        add = st.button("➕ Adicionar ponto selecionado")
-        if add and selected:
+        if st.button("➕ Adicionar ponto selecionado"):
             try:
                 lat, lon = geocode_city(selected.get("name"), selected.get("state"))
                 st.session_state.points.append({
@@ -280,18 +249,23 @@ with st.expander("📍 Pontos (Cidade → locale_id + lat/lon)", expanded=True):
                     "locale_id": int(selected.get("id")),
                     "lat": lat,
                     "lon": lon,
-                    "hist_allowed": None,  # será definido ao testar
-                    "note": "Lat/Lon sugeridos (geocoding). Se histórico negar, substitua por coordenadas autorizadas."
+                    # controle de permissão histórico:
+                    "hist_allowed": None,
+                    "hist_last_test_date": "",
+                    "hist_last_status": "",
+                    "hist_last_detail": "Lat/Lon sugeridos via geocoding. Se o histórico negar, substitua por coordenadas autorizadas do seu projeto.",
+                    # guarda coords testadas para detectar alteração:
+                    "_hist_coords_hash": f"{lat:.6f},{lon:.6f}"
                 })
                 st.success("Ponto adicionado.")
             except Exception as e:
                 st.error(f"Falha ao geocodificar/adicionar: {e}")
 
 # =========================
-# UI: editar/remover pontos
+# UI: Editar/remover pontos + RESET automático de hist_allowed se lat/lon mudar
 # =========================
 if st.session_state.points:
-    st.subheader("✅ Pontos cadastrados (edite lat/lon se necessário)")
+    st.subheader("✅ Pontos cadastrados (edite lat/lon; ao mudar, histórico será re-testável automaticamente)")
     df_points = pd.DataFrame(st.session_state.points)
 
     edited = st.data_editor(
@@ -305,8 +279,23 @@ if st.session_state.points:
         }
     )
 
-    # Persistir edição
-    st.session_state.points = edited.to_dict(orient="records")
+    # Detecta mudança de lat/lon e reseta hist_allowed automaticamente
+    new_points = edited.to_dict(orient="records")
+    for i, p in enumerate(new_points):
+        lat = float(p["lat"])
+        lon = float(p["lon"])
+        new_hash = f"{lat:.6f},{lon:.6f}"
+        old_hash = st.session_state.points[i].get("_hist_coords_hash", "")
+
+        if new_hash != old_hash:
+            # Coordenadas mudaram -> permitir novo teste
+            p["hist_allowed"] = None
+            p["hist_last_test_date"] = ""
+            p["hist_last_status"] = ""
+            p["hist_last_detail"] = "Coordenadas alteradas. Clique em 'Testar coordenadas' novamente."
+            p["_hist_coords_hash"] = new_hash
+
+    st.session_state.points = new_points
 
     colr1, colr2 = st.columns([2, 1])
     with colr1:
@@ -316,7 +305,7 @@ if st.session_state.points:
             st.session_state.points.pop(int(idx_remove))
             st.rerun()
 else:
-    st.info("Adicione ao menos um ponto.")
+    st.info("Adicione ao menos um ponto para usar previsão e/ou histórico.")
 
 st.divider()
 tab_prev, tab_hist = st.tabs(["🔮 Previsão (até 60 dias)", "🕒 Histórico GEO (Hourly + Diário)"])
@@ -333,9 +322,8 @@ with tab_prev:
         for p in st.session_state.points:
             label = f"{p['city']}-{p['uf']}"
 
-            # garante locale registrado (se necessário)
+            # registra locale (se necessário) — não bloqueia o app se falhar
             ok_reg, _, st_reg, err_reg = registrar_locale_no_token(p["locale_id"])
-            # não falha se já estiver registrado; se der erro, só loga em debug
             if (not ok_reg) and DEBUG:
                 st.warning(f"[DEBUG] Registro locale falhou para {label}: HTTP {st_reg}")
                 st.code(err_reg)
@@ -383,15 +371,19 @@ with tab_hist:
             label = f"{p['city']}-{p['uf']}"
             ok, payload, status, err = history_geo_hourly(float(p["lat"]), float(p["lon"]), data_inicio)
 
+            st.session_state.points[i]["hist_last_test_date"] = data_inicio.strftime("%Y-%m-%d")
+            st.session_state.points[i]["hist_last_status"] = f"HTTP {status}"
+
             if ok:
                 st.success(f"{label}: ✅ coordenadas aceitas (teste OK)")
                 st.session_state.points[i]["hist_allowed"] = True
+                st.session_state.points[i]["hist_last_detail"] = "OK"
             else:
-                st.error(f"{label}: ❌ (HTTP {status})")
+                st.error(f"{label}: ❌ coordenadas recusadas (HTTP {status})")
+                st.session_state.points[i]["hist_allowed"] = False
+                st.session_state.points[i]["hist_last_detail"] = err
                 if DEBUG:
                     st.code(err)
-                # marca como não permitido
-                st.session_state.points[i]["hist_allowed"] = False
 
         st.rerun()
 
@@ -399,49 +391,46 @@ with tab_hist:
         hourly_all = []
         daily_all = []
 
-        total_steps = len(st.session_state.points) * dias_hist
-        done = 0
-        prog = st.progress(0.0)
-
-        for p in st.session_state.points:
+        for i, p in enumerate(st.session_state.points):
             label = f"{p['city']}-{p['uf']}"
 
-            # se nunca testou, testa automaticamente 1x
+            # se não testou ou coords mudaram, testa automaticamente 1x
             if p.get("hist_allowed") is None:
                 ok_test, _, st_test, err_test = history_geo_hourly(float(p["lat"]), float(p["lon"]), data_inicio)
+                st.session_state.points[i]["hist_last_test_date"] = data_inicio.strftime("%Y-%m-%d")
+                st.session_state.points[i]["hist_last_status"] = f"HTTP {st_test}"
+
                 if ok_test:
-                    p["hist_allowed"] = True
+                    st.session_state.points[i]["hist_allowed"] = True
+                    st.session_state.points[i]["hist_last_detail"] = "OK"
                 else:
-                    p["hist_allowed"] = False
-                    st.error(f"{label}: histórico não autorizado (HTTP {st_test}) — ajuste lat/lon para coordenadas permitidas.")
+                    st.session_state.points[i]["hist_allowed"] = False
+                    st.session_state.points[i]["hist_last_detail"] = err_test
+                    st.warning(f"{label}: pulado (histórico não permitido). Ajuste lat/lon e teste novamente.")
                     if DEBUG:
                         st.code(err_test)
                     continue
 
-            # se já está marcado como não permitido, pula
-            if p.get("hist_allowed") is False:
+            # se não permitido, pula
+            if st.session_state.points[i].get("hist_allowed") is False:
                 st.warning(f"{label}: pulado (histórico não permitido). Ajuste lat/lon e teste novamente.")
                 continue
 
             # coleta hourly dia a dia
             dfs_point = []
-            for i in range(dias_hist):
-                d = data_inicio + timedelta(days=i)
+            for j in range(dias_hist):
+                d = data_inicio + timedelta(days=j)
                 ok, payload, status, err = history_geo_hourly(float(p["lat"]), float(p["lon"]), d)
-                done += 1
-                prog.progress(min(done / total_steps, 1.0))
-
                 if not ok:
                     st.warning(f"{label} em {d}: HTTP {status}")
                     if DEBUG:
                         st.code(err)
 
-                    # se for o erro de coordenadas não permitidas, interrompe para este ponto
                     if "Latitude and Longitude not allowed" in (err or ""):
-                        st.error(f"{label}: coordenadas NÃO permitidas — atualize lat/lon para as coordenadas autorizadas do seu projeto.")
-                        p["hist_allowed"] = False
+                        st.error(f"{label}: coordenadas NÃO permitidas — atualize lat/lon para coordenadas autorizadas.")
+                        st.session_state.points[i]["hist_allowed"] = False
+                        st.session_state.points[i]["hist_last_detail"] = err
                         break
-
                     continue
 
                 dfh = normalize_history_payload(payload)
@@ -456,7 +445,6 @@ with tab_hist:
                 hourly_all.append(df_hourly)
 
                 df_daily = build_daily_summary(df_hourly.copy())
-                # garante colunas do ponto
                 if "Ponto" not in df_daily.columns:
                     df_daily.insert(0, "Ponto", label)
                 daily_all.append(df_daily)
@@ -482,5 +470,3 @@ with tab_hist:
             )
         else:
             st.warning("Nenhum histórico foi gerado. Ajuste lat/lon para coordenadas permitidas e teste novamente.")
-
-
