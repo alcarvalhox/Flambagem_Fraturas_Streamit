@@ -180,7 +180,12 @@ def history_geo_hourly_from_city(city: str, uf: str, from_dt: date):
     """
     lat, lon = geocode_city(city, uf)
     from_str = from_dt.strftime("%Y-%m-%d")
-    path = HISTORY_GEO_HOURLY.format(from=from_str, lat=lat, lon=lon)
+    #path = HISTORY_GEO_HOURLY.format(from=from_str, lat=lat, lon=lon)
+    path = HISTORY_GEO_HOURLY.format_map({
+    "from": from_str,
+    "lat": lat,
+    "lon": lon
+})
     url = build_url(path, TOKEN_HIST)
     ok, payload, status, err = http_get(url)
     return ok, payload, status, err, (lat, lon), path
