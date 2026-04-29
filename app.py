@@ -12,26 +12,44 @@ BASE_V1 = "http://apiadvisor.climatempo.com.br/api/v1"
 API_MANAGER = "http://apiadvisor.climatempo.com.br/api-manager"
 GEOCODE_URL = "https://nominatim.openstreetmap.org/search"
 
-TOKEN_PREVISAO = "531a8163c4464184b1e8ff89742d531f"
-TOKEN_HIST = "8445618686be6cffc02c0954cbaada35"
+TOKEN_PREVISAO_DEFAULT = "531a8163c4464184b1e8ff89742d531f"
+TOKEN_HIST_DEFAULT = "8445618686be6cffc02c0954cbaada35"
 
 MAX_DIAS = 60
 
-# Candidatos de endpoint de histórico POR CIDADE/LOCALE (sem coordenadas)
-# (Como o portal da Climatempo funciona por cidade/periodo, é o comportamento desejado.)
+# Candidatos de endpoint de histórico POR CIDADE/LOCALE (sem coordenadas na UI)
+# Como o portal funciona por cidade + período, essa é a tentativa primária.
 HISTORY_LOCALE_CANDIDATES = [
-    # formatos comuns (você pode ajustar se o seu contrato usar outro)
     "/history/locale/{id}/days/{n}",
     "/history/locale/{id}/daily?from={from}&to={to}",
     "/history/locale/{id}?from={from}&to={to}",
     "/history/locale/{id}/daily/{from}/{to}",
 ]
 
-# Endpoint conhecido GEO/Hourly (fallback)
+# Fallback GEO/Hourly (sem coordenadas na UI: usa geocoding automático)
 HISTORY_GEO_HOURLY = "/history/geo/hourly?from={from}&latitude={lat}&longitude={lon}"
 
 st.set_page_config(page_title="Climatempo • Previsão (60d) & Histórico", layout="wide")
 st.title("🌦️ Climatempo • Previsão (até 60 dias) & Histórico (sem digitar coordenadas)")
+
+# =========================
+# SIDEBAR
+# =========================
+with st.sidebar:
+    st.header("🔐 Tokens")
+    TOKEN_PREVISAO = st.text_input(
+        "Token Previsão",
+        value=st.secrets.get("TOKEN_PREVISAO", TOKEN_PREVISAO_DEFAULT),
+        type="password",
+    )
+    TOKEN_HIST = st.text_input(
+        "Token Histórico",
+        value=st.secrets.get("TOKEN_HISTORICO", TOKEN_HIST_DEFAULT),
+        type="password",
+    )
+    st.divider()
+    DEBUG = st.checkbox("Modo debug", value=False)
+    st.caption("A visualização agora permite escolher colunas e alternar entre Raw e Resumo Diário.")
 
 # =========================
 # HTTP helpers
@@ -55,7 +73,15 @@ def http_put_form(url: str, data: dict, timeout: int = 30):
         return False, None, -1, str(e)
 
 # =========================
-# Geocoding automático (sem input de coords)
+# URL builder
+# =========================
+def build_url(path: str, token: str):
+    if "?" in path:
+        return f"{BASE_V1}{path}&token={token}"
+    return f"{BASE_V1}{path}?token={token}"
+
+# =========================
+# Geocoding automático (cidade -> lat/lon), sem input do usuário
 # =========================
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_city(city: str, uf: str):
@@ -80,19 +106,19 @@ def buscar_cidades(city: str, uf: str):
     return payload or []
 
 def registrar_locale_no_token(locale_id: int):
-    # Necessário em alguns planos: habilita o locale no token (evita "Access forbidden").
-    # Esse fluxo é amplamente usado em integrações com a Climatempo. [1](https://github.com/guieiras-dev/home-assistant-climatempo/)[2](https://apiadvisor.climatempo.com.br/doc/index.html)
+    # Evita “Access forbidden” em alguns planos registrando locale no token. [1](https://previsao.inmet.gov.br/)
     url = f"{API_MANAGER}/user-token/{TOKEN_PREVISAO}/locales"
     data = {"localeId[]": str(locale_id)}
     return http_put_form(url, data=data)
 
 # =========================
-# Previsão (até 60 dias)
+# Previsão (até 60 dias) por locale
 # =========================
 def fetch_forecast(locale_id: int, dias: int):
     """
-    A doc pública descreve /forecast/locale/:id/days/15 e /days/270. [2](https://apiadvisor.climatempo.com.br/doc/index.html)
-    Não chamamos /days/60. Chamamos 270 e recortamos até 60.
+    Forecast por cidade usa rotas fixas (ex.: /days/15 e /days/270). [1](https://previsao.inmet.gov.br/)
+    - tenta /days/270 e recorta até 60
+    - fallback /days/15
     """
     dias = max(1, min(MAX_DIAS, int(dias)))
 
@@ -106,7 +132,7 @@ def fetch_forecast(locale_id: int, dias: int):
     if ok2 and isinstance(payload2, dict) and "data" in payload2:
         return True, payload2["data"][:min(dias, 15)], status2, "", 15
 
-    return False, None, status2 if not ok else status, err2 if not ok2 else err, None
+    return False, None, (status2 if not ok else status), (err2 if not ok2 else err), None
 
 def forecast_to_df(days_list: list, point_label: str, locale_id: int):
     rows = []
@@ -124,7 +150,7 @@ def forecast_to_df(days_list: list, point_label: str, locale_id: int):
             "Temp Min (°C)": temp.get("min"),
             "Temp Max (°C)": temp.get("max"),
             "Chuva (mm)": rain.get("precipitation"),
-            "Prob Chuva (%)": rain.get("probability"),  # pode não existir em alguns retornos
+            "Prob Chuva (%)": rain.get("probability"),
             "Umidade Min (%)": hum.get("min"),
             "Umidade Max (%)": hum.get("max"),
             "Vento Médio (km/h)": wind.get("velocity_avg") or wind.get("speed"),
@@ -134,64 +160,48 @@ def forecast_to_df(days_list: list, point_label: str, locale_id: int):
     return pd.DataFrame(rows)
 
 # =========================
-# Histórico (sem coordenadas na UI)
-# Estratégia:
-# 1) Tenta histórico por locale (portal-like)
-# 2) Fallback para GEO/Hourly com geocoding automático
+# Histórico: tenta por locale (portal-like) -> fallback geo/hourly (com geocoding automático)
 # =========================
-def build_url(path: str, token: str):
-    if "?" in path:
-        return f"{BASE_V1}{path}&token={token}"
-    return f"{BASE_V1}{path}?token={token}"
-
 def try_history_by_locale(locale_id: int, from_dt: date, to_dt: date):
     """
-    Tenta encontrar um endpoint de histórico por cidade/locale.
-    Retorna (ok, payload, status, err, endpoint_used)
+    IMPORTANTE: não usar from=... (palavra reservada).
+    Por isso usamos template.format_map({...}).
     """
     from_str = from_dt.strftime("%Y-%m-%d")
     to_str = to_dt.strftime("%Y-%m-%d")
     days = (to_dt - from_dt).days + 1
 
     last_status, last_err = None, None
-
     for template in HISTORY_LOCALE_CANDIDATES:
-        # ✅ CORREÇÃO: não usar from=... (palavra reservada). Use format_map com dict.
         path = template.format_map({
             "id": locale_id,
             "n": days,
             "from": from_str,
             "to": to_str
         })
-
         url = build_url(path, TOKEN_HIST)
         ok, payload, status, err = http_get(url)
-
         if ok:
             return True, payload, status, "", path
-
         last_status, last_err = status, err
 
     return False, None, last_status, last_err, None
 
 def history_geo_hourly_from_city(city: str, uf: str, from_dt: date):
-    """
-    Fallback: usa geocoding automático e chama /history/geo/hourly
-    """
     lat, lon = geocode_city(city, uf)
     from_str = from_dt.strftime("%Y-%m-%d")
-    #path = HISTORY_GEO_HOURLY.format(from=from_str, lat=lat, lon=lon)
+
+    # IMPORTANTE: não usar .format(from=...) -> usar format_map
     path = HISTORY_GEO_HOURLY.format_map({
-    "from": from_str,
-    "lat": lat,
-    "lon": lon
-})
+        "from": from_str,
+        "lat": lat,
+        "lon": lon
+    })
     url = build_url(path, TOKEN_HIST)
     ok, payload, status, err = http_get(url)
     return ok, payload, status, err, (lat, lon), path
 
 def normalize_history_payload(payload):
-    # Tenta padrões comuns
     if payload is None:
         return pd.DataFrame()
     if isinstance(payload, dict) and isinstance(payload.get("data"), list):
@@ -200,6 +210,9 @@ def normalize_history_payload(payload):
         return pd.json_normalize(payload)
     return pd.json_normalize(payload)
 
+# =========================
+# Resumo diário: mais rico e robusto (tenta achar várias colunas)
+# =========================
 def pick_first_col(df: pd.DataFrame, candidates: list):
     for c in candidates:
         if c in df.columns:
@@ -207,6 +220,14 @@ def pick_first_col(df: pd.DataFrame, candidates: list):
     return None
 
 def build_daily_summary(df_hourly: pd.DataFrame):
+    """
+    Gera resumo diário:
+      - chuva_total_mm (soma)
+      - temp_min / temp_max
+      - umidade_media
+      - vento_max (se existir)
+      - pressão min/max/media (se existir)
+    """
     if df_hourly.empty:
         return df_hourly
 
@@ -217,27 +238,63 @@ def build_daily_summary(df_hourly: pd.DataFrame):
     dt = pd.to_datetime(df_hourly[time_col], errors="coerce")
     df_hourly = df_hourly.assign(_day=dt.dt.date)
 
-    rain_col = pick_first_col(df_hourly, ["rain.precipitation", "precipitation", "rain", "mm"])
-    t_col = pick_first_col(df_hourly, ["temperature", "temp", "temperature.value", "temperatureC"])
-    h_col = pick_first_col(df_hourly, ["humidity", "humidity.value", "rh"])
+    rain_col = pick_first_col(df_hourly, [
+        "rain.precipitation", "precipitation", "rain", "mm"
+    ])
+
+    t_col = pick_first_col(df_hourly, [
+        "temperature", "temp", "temperature.value", "temperatureC",
+        "temperature.mean", "temperature.avg", "temperature.air",
+        "temp.value", "temp_c"
+    ])
+
+    h_col = pick_first_col(df_hourly, [
+        "humidity", "humidity.value", "rh",
+        "humidity.relative", "relative_humidity", "humidity_pct"
+    ])
+
+    wind_col = pick_first_col(df_hourly, [
+        "wind.speed", "wind.velocity", "windSpeed", "wind.speed_kmh",
+        "wind.gust", "wind.gust_max"
+    ])
+
+    press_col = pick_first_col(df_hourly, [
+        "pressure", "pressure.value", "pressure_hpa",
+        "pressure.sea_level", "pressure.msl"
+    ])
 
     agg = {}
-    if rain_col: agg[rain_col] = "sum"
-    if t_col:    agg[t_col] = ["min", "max"]
-    if h_col:    agg[h_col] = "mean"
+    if rain_col:
+        agg[rain_col] = "sum"
+    if t_col:
+        agg[t_col] = ["min", "max"]
+    if h_col:
+        agg[h_col] = "mean"
+    if wind_col:
+        agg[wind_col] = "max"
+    if press_col:
+        agg[press_col] = ["min", "max", "mean"]
 
     g = df_hourly.groupby("_day").agg(agg)
     g.columns = ["_".join([str(x) for x in col if x]) if isinstance(col, tuple) else str(col) for col in g.columns]
     g = g.reset_index().rename(columns={"_day": "dia"})
     g["dia"] = g["dia"].astype(str)
 
-    # nomes amigáveis
+    # Nomes amigáveis
     rename = {}
-    if rain_col: rename[f"{rain_col}_sum"] = "chuva_total_mm"
+    if rain_col:
+        rename[f"{rain_col}_sum"] = "chuva_total_mm"
     if t_col:
         rename[f"{t_col}_min"] = "temp_min"
         rename[f"{t_col}_max"] = "temp_max"
-    if h_col: rename[f"{h_col}_mean"] = "umidade_media"
+    if h_col:
+        rename[f"{h_col}_mean"] = "umidade_media"
+    if wind_col:
+        rename[f"{wind_col}_max"] = "vento_max"
+    if press_col:
+        rename[f"{press_col}_min"] = "pressao_min"
+        rename[f"{press_col}_max"] = "pressao_max"
+        rename[f"{press_col}_mean"] = "pressao_media"
 
     return g.rename(columns=rename)
 
@@ -284,25 +341,27 @@ if st.session_state.points:
 else:
     st.info("Adicione pelo menos uma cidade.")
 
-tab_prev, tab_hist = st.tabs(["🔮 Previsão (até 60 dias)", "🕒 Histórico (Portal-like, sem coordenadas)"])
+tab_prev, tab_hist = st.tabs(["🔮 Previsão (até 60 dias)", "🕒 Histórico (Hourly + Diário)"])
 
 # =========================
 # TAB PREVISÃO
 # =========================
 with tab_prev:
     dias_prev = st.slider("Dias de previsão", 1, MAX_DIAS, 15)
+
     if st.button("Gerar Previsão XLSX", use_container_width=True):
         all_df = []
         for p in st.session_state.points:
             label = f"{p['city']}-{p['uf']}"
 
-            # tenta registrar locale no token (se for necessário)
+            # registra locale (se necessário); não bloqueia se falhar
             registrar_locale_no_token(p["locale_id"])
 
             ok, days, status, err, used = fetch_forecast(p["locale_id"], dias_prev)
             if not ok:
                 st.error(f"Previsão falhou para {label}: HTTP {status}")
-                st.code(err)
+                if DEBUG:
+                    st.code(err)
                 continue
 
             df = forecast_to_df(days, label, p["locale_id"])
@@ -312,6 +371,7 @@ with tab_prev:
         if all_df:
             out = pd.concat(all_df, ignore_index=True)
             st.dataframe(out, use_container_width=True)
+
             xlsx = to_xlsx({"Previsao": out})
             st.download_button(
                 "⬇️ Download Previsão (XLSX)",
@@ -336,7 +396,7 @@ with tab_hist:
         for p in st.session_state.points:
             label = f"{p['city']}-{p['uf']}"
 
-            # 1) tenta histórico por locale (SEM coordenadas)
+            # 1) tenta histórico por locale (sem coords)
             ok_loc, payload, status, err, endpoint_used = try_history_by_locale(p["locale_id"], data_inicio, data_fim)
 
             if ok_loc:
@@ -345,26 +405,18 @@ with tab_hist:
                 df_hist.insert(1, "endpoint_used", endpoint_used)
                 hourly_all.append(df_hist)
 
-                # se já vier diário, o resumo pode ser o próprio df (mas tentamos gerar)
                 df_daily = build_daily_summary(df_hist.copy())
                 df_daily.insert(0, "Ponto", label)
                 daily_all.append(df_daily)
                 continue
 
-            # 2) fallback GEO/hourly com coordenadas automáticas (sem input do usuário)
+            # 2) fallback geo/hourly (coords automáticas via geocoding)
             ok_geo, payload2, status2, err2, (lat, lon), endpoint_geo = history_geo_hourly_from_city(p["city"], p["uf"], data_inicio)
 
             if not ok_geo:
                 st.error(f"Histórico falhou para {label}. HTTP {status2}")
-                st.code(err2)
-
-                # mensagem prática para o caso clássico:
-                if "Latitude and Longitude not allowed" in (err2 or ""):
-                    st.warning(
-                        f"{label}: o token histórico não permite as coordenadas geocodificadas automaticamente (centro da cidade). "
-                        "Isso indica whitelist de pontos no token. Para reproduzir o portal 100%, é necessário um endpoint histórico por cidade "
-                        "habilitado no seu contrato (ou a lista de pontos autorizados por cidade)."
-                    )
+                if DEBUG:
+                    st.code(err2)
                 continue
 
             df_hist2 = normalize_history_payload(payload2)
@@ -382,9 +434,47 @@ with tab_hist:
             out_hourly = pd.concat(hourly_all, ignore_index=True)
             out_daily = pd.concat(daily_all, ignore_index=True) if daily_all else pd.DataFrame()
 
-            st.subheader("Prévia do Resumo Diário")
-            st.dataframe(out_daily.head(200), use_container_width=True)
+            # =========================
+            # ✅ VISUALIZAÇÃO COMPLETA NA TELA (SUGESTÕES IMPLEMENTADAS)
+            # =========================
+            st.subheader("📊 Visualização na tela (completa)")
 
+            modo = st.radio(
+                "O que deseja visualizar?",
+                ["Resumo Diário", "Histórico Horário (Raw)"],
+                horizontal=True
+            )
+
+            df_view = out_daily.copy() if modo == "Resumo Diário" else out_hourly.copy()
+
+            with st.expander("Selecionar colunas para visualizar", expanded=False):
+                cols_default = df_view.columns.tolist()
+
+                prefer = [
+                    "Ponto", "dia", "from_date", "date", "datetime",
+                    "chuva_total_mm", "temp_min", "temp_max", "umidade_media", "vento_max",
+                    "pressao_min", "pressao_max", "pressao_media",
+                    "rain.precipitation", "precipitation",
+                    "temperature", "temp", "humidity", "pressure",
+                    "wind.speed", "wind.direction", "wind.gust",
+                    "lat", "lon",
+                    "endpoint_used"
+                ]
+                cols_pref = [c for c in prefer if c in cols_default]
+                cols_initial = cols_pref + [c for c in cols_default if c not in cols_pref]
+
+                selected_cols = st.multiselect(
+                    "Colunas",
+                    options=cols_default,
+                    default=cols_initial
+                )
+
+            st.caption(f"Colunas exibidas: {len(selected_cols)} de {len(df_view.columns)}")
+            st.dataframe(df_view[selected_cols], use_container_width=True, height=520)
+
+            # =========================
+            # DOWNLOAD XLSX
+            # =========================
             xlsx = to_xlsx({
                 "Historico_Horario": out_hourly,
                 "Resumo_Diario": out_daily if not out_daily.empty else pd.DataFrame({"info": ["Resumo diário indisponível."]})
