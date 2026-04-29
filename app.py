@@ -153,13 +153,26 @@ def try_history_by_locale(locale_id: int, from_dt: date, to_dt: date):
     to_str = to_dt.strftime("%Y-%m-%d")
     days = (to_dt - from_dt).days + 1
 
+    last_status, last_err = None, None
+
     for template in HISTORY_LOCALE_CANDIDATES:
-        path = template.format(id=locale_id, n=days, from=from_str, to=to_str)
+        # ✅ CORREÇÃO: não usar from=... (palavra reservada). Use format_map com dict.
+        path = template.format_map({
+            "id": locale_id,
+            "n": days,
+            "from": from_str,
+            "to": to_str
+        })
+
         url = build_url(path, TOKEN_HIST)
         ok, payload, status, err = http_get(url)
+
         if ok:
             return True, payload, status, "", path
-    return False, None, status, err, None
+
+        last_status, last_err = status, err
+
+    return False, None, last_status, last_err, None
 
 def history_geo_hourly_from_city(city: str, uf: str, from_dt: date):
     """
