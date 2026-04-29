@@ -10,24 +10,12 @@ from datetime import datetime, timedelta, date
 # =========================
 BASE_V1 = "http://apiadvisor.climatempo.com.br/api/v1"
 API_MANAGER = "http://apiadvisor.climatempo.com.br/api-manager"
+GEOCODE_URL = "https://nominatim.openstreetmap.org/search"
 
 TOKEN_PREVISAO_DEFAULT = "531a8163c4464184b1e8ff89742d531f"
 TOKEN_HIST_DEFAULT = "8445618686be6cffc02c0954cbaada35"
 
 MAX_DIAS = 60
-
-# Candidatos de histórico por LOCALE (sem coordenadas na UI)
-# (mantém "portal-like"; se seu contrato usar outro caminho, ajustamos aqui)
-HISTORY_LOCALE_CANDIDATES = [
-    "/history/locale/{id}/days/{n}",
-    "/history/locale/{id}/daily?from={from}&to={to}",
-    "/history/locale/{id}?from={from}&to={to}",
-    "/history/locale/{id}/daily/{from}/{to}",
-]
-
-# Fallback GEO/hourly (somente se necessário — pode ser bloqueado por whitelist)
-# Mantido, mas a rota principal é por locale.
-HISTORY_GEO_HOURLY = "/history/geo/hourly?from={from}&latitude={lat}&longitude={lon}"
 
 # =========================
 # LISTA FIXA DO SMAC (89 cidades + UF)
@@ -123,13 +111,12 @@ SMAC_CITY_STATE = {
     "Vassouras": "RJ",
     "Volta Redonda": "RJ",
 }
-
 SMAC_CITIES = sorted(SMAC_CITY_STATE.keys())
 
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="Climatempo • SMAC Cities", layout="wide")
+st.set_page_config(page_title="SMAC • Previsão & Histórico", layout="wide")
 st.title("🌦️ SMAC • Previsão (até 60 dias) & Histórico (Hourly + Diário)")
 
 with st.sidebar:
@@ -168,14 +155,22 @@ def http_put_form(url: str, data: dict, timeout: int = 30):
     except Exception as e:
         return False, None, -1, str(e)
 
-def build_url(path: str, token: str):
-    if "?" in path:
-        return f"{BASE_V1}{path}&token={token}"
-    return f"{BASE_V1}{path}?token={token}"
+# =========================
+# Geocoding automático (cidade+UF -> lat/lon) sem input do usuário
+# =========================
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_city(city: str, uf: str):
+    params = {"q": f"{city}, {uf}, Brazil", "format": "json", "limit": 1}
+    headers = {"User-Agent": "smac-streamlit"}
+    r = requests.get(GEOCODE_URL, params=params, headers=headers, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    if not data:
+        raise ValueError(f"Geocoding não retornou coordenadas para {city}-{uf}")
+    return float(data[0]["lat"]), float(data[0]["lon"])
 
 # =========================
-# LOCALE lookup (cidade + UF -> locale_id)
-# Endpoint: /locale/city?name=...&state=...&token=... [1](https://www.infolocale.fr/evenements/evenement-colleville-sur-mer-patrimoine-overlord-historical-days-2009191640)
+# LOCALE lookup (cidade+UF -> locale_id) via Advisor
 # =========================
 @st.cache_data(ttl=86400, show_spinner=False)
 def resolve_locale_id(city: str, uf: str, token_previsao: str):
@@ -188,19 +183,21 @@ def resolve_locale_id(city: str, uf: str, token_previsao: str):
     return int(payload[0]["id"])
 
 def registrar_locale_no_token(locale_id: int, token_previsao: str):
-    # PUT /api-manager/user-token/<token>/locales com localeId[] [2](https://www.youtube.com/watch?v=Rm1yjmj3yYc)[1](https://www.infolocale.fr/evenements/evenement-colleville-sur-mer-patrimoine-overlord-historical-days-2009191640)
+    # PUT /api-manager/user-token/<token>/locales com localeId[]  [2](https://www.youtube.com/watch?v=Rm1yjmj3yYc)[1](https://www.infolocale.fr/evenements/evenement-colleville-sur-mer-patrimoine-overlord-historical-days-2009191640)
     url = f"{API_MANAGER}/user-token/{token_previsao}/locales"
     data = {"localeId[]": str(locale_id)}
     return http_put_form(url, data=data)
 
 # =========================
 # FORECAST (até 60 dias) por locale_id
-# endpoints fixos /days/15 e /days/270 (quando disponível) [1](https://www.infolocale.fr/evenements/evenement-colleville-sur-mer-patrimoine-overlord-historical-days-2009191640)
 # =========================
 def fetch_forecast(locale_id: int, dias: int, token_previsao: str):
+    """
+    Usa endpoints fixos /days/15 e /days/270 (quando disponível). [1](https://www.infolocale.fr/evenements/evenement-colleville-sur-mer-patrimoine-overlord-historical-days-2009191640)
+    """
     dias = max(1, min(MAX_DIAS, int(dias)))
 
-    # tenta 270
+    # tenta 270 e recorta
     url270 = f"{BASE_V1}/forecast/locale/{locale_id}/days/270?token={token_previsao}"
     ok, payload, status, err = http_get(url270)
     if ok and isinstance(payload, dict) and "data" in payload:
@@ -240,29 +237,15 @@ def forecast_to_df(days_list: list, label: str, locale_id: int):
     return pd.DataFrame(rows)
 
 # =========================
-# HISTORY (tenta por locale primeiro; fallback geo/hourly)
+# HISTORY GEO/HOURLY (substitui history/locale que dava 404)
 # =========================
-def try_history_by_locale(locale_id: int, from_dt: date, to_dt: date, token_hist: str):
+def history_geo_hourly(lat: float, lon: float, from_dt: date, token_hist: str):
     from_str = from_dt.strftime("%Y-%m-%d")
-    to_str = to_dt.strftime("%Y-%m-%d")
-    days = (to_dt - from_dt).days + 1
-
-    last_status, last_err = None, None
-    for template in HISTORY_LOCALE_CANDIDATES:
-        # NÃO usar from= (reservado) -> format_map com dict
-        path = template.format_map({
-            "id": locale_id,
-            "n": days,
-            "from": from_str,
-            "to": to_str
-        })
-        url = build_url(path, token_hist)
-        ok, payload, status, err = http_get(url)
-        if ok:
-            return True, payload, status, "", path
-        last_status, last_err = status, err
-
-    return False, None, last_status, last_err, None
+    url = (
+        f"{BASE_V1}/history/geo/hourly"
+        f"?token={token_hist}&from={from_str}&latitude={lat}&longitude={lon}"
+    )
+    return http_get(url)
 
 def normalize_history_payload(payload):
     if payload is None:
@@ -352,14 +335,13 @@ st.subheader("📍 Cidades SMAC (pré-carregadas)")
 selected_cities = st.multiselect(
     "Selecione uma ou mais cidades",
     options=SMAC_CITIES,
-    default=["Juiz de Fora"] if "Juiz de Fora" in SMAC_CITIES else []
+    default=["Barbacena"] if "Barbacena" in SMAC_CITIES else []
 )
 
 if not selected_cities:
     st.info("Selecione pelo menos uma cidade para gerar previsão/histórico.")
     st.stop()
 
-# Resolve UF e locale_id automaticamente
 with st.expander("🔎 Mapeamento automático (cidade → UF → locale_id)", expanded=False):
     mapping_rows = []
     for city in selected_cities:
@@ -396,7 +378,6 @@ with tab_prev:
                     st.code(str(e))
                 continue
 
-            # tenta registrar locale (se necessário) — não interrompe se falhar
             ok_reg, _, st_reg, err_reg = registrar_locale_no_token(locale_id, TOKEN_PREVISAO)
             if (not ok_reg) and DEBUG:
                 st.warning(f"[DEBUG] registro locale falhou para {label}: HTTP {st_reg}")
@@ -434,7 +415,6 @@ with tab_prev:
 with tab_hist:
     dias_hist = st.slider("Dias de histórico", 1, MAX_DIAS, 7)
     data_inicio = st.date_input("Data inicial", value=date.today() - timedelta(days=dias_hist))
-    data_fim = data_inicio + timedelta(days=dias_hist - 1)
 
     if st.button("Gerar Histórico (Hourly + Diário) (XLSX)", use_container_width=True):
         hourly_all = []
@@ -444,45 +424,51 @@ with tab_hist:
             uf = SMAC_CITY_STATE[city]
             label = f"{city}-{uf}"
 
-            # resolve locale_id (mesmo se histórico usar outro identificador, é útil para rastreio)
+            # lat/lon automáticos (sem input do usuário)
             try:
-                locale_id = resolve_locale_id(city, uf, TOKEN_PREVISAO)
-            except Exception:
-                locale_id = None
-
-            # tenta histórico por locale
-            ok_loc, payload, status, err, endpoint_used = try_history_by_locale(
-                locale_id if locale_id else -1,
-                data_inicio,
-                data_fim,
-                TOKEN_HIST
-            )
-
-            if not ok_loc:
-                st.error(f"Histórico por locale falhou para {label}: HTTP {status}")
+                lat, lon = geocode_city(city, uf)
+            except Exception as e:
+                st.error(f"{label}: falha ao obter coordenadas automaticamente")
                 if DEBUG:
-                    st.code(err)
+                    st.code(str(e))
                 continue
 
-            df_hist = normalize_history_payload(payload)
-            df_hist.insert(0, "Ponto", label)
-            df_hist.insert(1, "locale_id", locale_id)
-            df_hist.insert(2, "endpoint_used", endpoint_used)
-            hourly_all.append(df_hist)
+            # coleta dia a dia (loop)
+            dfs_point = []
+            for i in range(dias_hist):
+                d = data_inicio + timedelta(days=i)
+                ok, payload, status, err = history_geo_hourly(lat, lon, d, TOKEN_HIST)
+                if not ok:
+                    # Se for whitelist/permite, informa e interrompe a cidade
+                    st.warning(f"{label} em {d}: HTTP {status}")
+                    if DEBUG:
+                        st.code(err)
+                    if "Latitude and Longitude not allowed" in (err or ""):
+                        st.error(f"{label}: coordenadas recusadas pelo token histórico (whitelist).")
+                        break
+                    continue
 
-            df_daily = build_daily_summary(df_hist.copy())
-            df_daily.insert(0, "Ponto", label)
-            daily_all.append(df_daily)
+                dfh = normalize_history_payload(payload)
+                dfh.insert(0, "Ponto", label)
+                dfh.insert(1, "from_date", d.strftime("%Y-%m-%d"))
+                dfh.insert(2, "lat", lat)
+                dfh.insert(3, "lon", lon)
+                dfs_point.append(dfh)
+
+            if dfs_point:
+                df_hourly = pd.concat(dfs_point, ignore_index=True)
+                hourly_all.append(df_hourly)
+
+                df_daily = build_daily_summary(df_hourly.copy())
+                df_daily.insert(0, "Ponto", label)
+                daily_all.append(df_daily)
 
         if hourly_all:
             out_hourly = pd.concat(hourly_all, ignore_index=True)
             out_daily = pd.concat(daily_all, ignore_index=True) if daily_all else pd.DataFrame()
 
-            # =========================
-            # VISUALIZAÇÃO COMPLETA NA TELA (Raw x Resumo + seleção de colunas)
-            # =========================
+            # Visualização completa
             st.subheader("📊 Visualização na tela (completa)")
-
             modo = st.radio(
                 "O que deseja visualizar?",
                 ["Resumo Diário", "Histórico Horário (Raw)"],
@@ -492,7 +478,6 @@ with tab_hist:
 
             with st.expander("Selecionar colunas para visualizar", expanded=False):
                 cols_default = df_view.columns.tolist()
-
                 prefer = [
                     "Ponto", "dia", "from_date", "date", "datetime",
                     "chuva_total_mm", "temp_min", "temp_max", "umidade_media", "vento_max",
@@ -500,7 +485,7 @@ with tab_hist:
                     "rain.precipitation", "precipitation",
                     "temperature", "temp", "humidity", "pressure",
                     "wind.speed", "wind.direction", "wind.gust",
-                    "locale_id", "endpoint_used",
+                    "lat", "lon",
                 ]
                 cols_pref = [c for c in prefer if c in cols_default]
                 cols_initial = cols_pref + [c for c in cols_default if c not in cols_pref]
@@ -514,9 +499,7 @@ with tab_hist:
             st.caption(f"Colunas exibidas: {len(selected_cols)} de {len(df_view.columns)}")
             st.dataframe(df_view[selected_cols], use_container_width=True, height=520)
 
-            # =========================
-            # DOWNLOAD XLSX
-            # =========================
+            # Download XLSX (2 abas)
             xlsx = to_xlsx({
                 "Historico_Horario": out_hourly,
                 "Resumo_Diario": out_daily if not out_daily.empty else pd.DataFrame({"info": ["Resumo diário indisponível."]})
